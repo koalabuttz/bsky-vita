@@ -19,6 +19,9 @@ assets = "static"
 vitasdk-sys = { workspace = true }
 vita-newlib-shims = { workspace = true }
 
+# Spike: TLS + HTTP. Will move to crates/bsky-net once the spike is green.
+ureq = { workspace = true }
+
 # Library crates are wired in as Phase 1 work fills them in:
 # bsky-render = { path = "../crates/bsky-render" }
 # bsky-ui     = { path = "../crates/bsky-ui" }

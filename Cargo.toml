@@ -14,19 +14,28 @@ serde_json = "1"
 vitasdk-sys = { version = "0.3.3", features = ["all-stubs"] }
 vita-newlib-shims = "0.3.1"
 
-# Network/auth/atproto deps reserved here so the spike step (task #13)
-# can pin them in one place. Commented out until needed so the skeleton
-# build stays minimal.
+# Spike: ureq + rustls + webpki-roots to validate TLS to api.bsky.app.
+# Not pulling atrium yet — the spike's purpose is to retire the rustls
+# build risk in isolation, before adding XRPC abstractions on top.
+ureq = { version = "2.10", default-features = false, features = ["tls"] }
+# In ureq 2.10+ the `tls` feature pulls rustls + webpki-roots + rustls-pki-types
+# (the convention was reversed from earlier 2.x where `tls` meant native-tls).
+# `gzip` is intentionally OFF for now: enabling it pulls flate2 → simd-adler32,
+# whose NEON intrinsics path requires #![feature(stdarch_arm_neon_intrinsics)]
+# which the upstream crate doesn't enable on its own. Re-add gzip in Phase 1
+# with either a flate2 backend swap or a [patch.crates-io] for simd-adler32.
+
+# atrium / xrpc deps will be wired in once the spike confirms TLS works:
 # atrium-api = { version = "0.25", default-features = false, features = ["bluesky", "namespace-appbsky", "namespace-comatproto"] }
 # atrium-xrpc = "0.12"
-# ureq = { version = "2.10", default-features = false, features = ["tls", "gzip"] }
-# rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "logging"] }
-# webpki-roots = "0.26"
 # futures = { version = "0.3", default-features = false, features = ["executor"] }
 
-# Patch overrides will be added during the spike step:
-# [patch.crates-io]
-# ring = { git = "https://github.com/vita-rust/ring", branch = "v0.17.14-vita" }
+[patch.crates-io]
+# ring 0.17.14 upstream build.rs doesn't emit ARM assembly for
+# armv7-sony-vita-newlibeabihf, leaving symbols like
+# `ring_core_0_17_14__sha256_block_data_order_nohw` unresolved at link.
+# vita-rust/ring's v0.17.14-vita branch teaches build.rs about the target.
+ring = { git = "https://github.com/vita-rust/ring", branch = "v0.17.14-vita" }
 
 [profile.release]
 opt-level = "z"
