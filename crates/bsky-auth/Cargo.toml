@@ -1,0 +1,6 @@
+[package]
+name = "bsky-auth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Session storage, JWT decode, app-password createSession + refresh rotation"

@@ -1,0 +1,6 @@
+[package]
+name = "bsky-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Flat-file LRU cache for posts, blobs, avatars, thumbs under ux0:data/BSKY00001/"

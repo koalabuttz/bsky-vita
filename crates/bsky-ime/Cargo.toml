@@ -1,0 +1,9 @@
+[package]
+name = "bsky-ime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "sceImeDialog wrapper for text input (Vita-only)"
+
+[target.'cfg(target_os = "vita")'.dependencies]
+vitasdk-sys = { workspace = true }

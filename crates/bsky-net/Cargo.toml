@@ -1,0 +1,6 @@
+[package]
+name = "bsky-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "XRPC client over ureq + rustls; atrium HttpClient implementation"

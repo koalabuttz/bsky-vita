@@ -1,0 +1,14 @@
+# Cargo
+/target/
+**/target/
+
+# Vita build artifacts
+*.vpk
+*.velf
+*.self
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store

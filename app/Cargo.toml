@@ -1,0 +1,29 @@
+[package]
+name = "bsky-vita-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bluesky (AT Protocol) homebrew client for PlayStation Vita"
+
+[package.metadata.vita]
+title_id = "BSKY00001"
+title_name = "BskyVita"
+build_std = "std,panic_unwind"
+# Assets directory: contents mirror the VPK layout. So `static/sce_sys/icon0.png`
+# is packed as `sce_sys/icon0.png` in the VPK.
+assets = "static"
+# vita-mksfoex flags default to ATTRIBUTE2=12 (bumps MAIN heap budget to 365 MiB),
+# inherited from cargo-vita defaults. Override via `vita_mksfoex_flags = [...]` if needed.
+
+[dependencies]
+vitasdk-sys = { workspace = true }
+vita-newlib-shims = { workspace = true }
+
+# Library crates are wired in as Phase 1 work fills them in:
+# bsky-render = { path = "../crates/bsky-render" }
+# bsky-ui     = { path = "../crates/bsky-ui" }
+# bsky-net    = { path = "../crates/bsky-net" }
+
+[[bin]]
+name = "bsky-vita"
+path = "src/main.rs"

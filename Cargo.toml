@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = ["app", "crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+
+[workspace.dependencies]
+# Shared deps wired into crates as features fill in.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+vitasdk-sys = { version = "0.3.3", features = ["all-stubs"] }
+vita-newlib-shims = "0.3.1"
+
+# Network/auth/atproto deps reserved here so the spike step (task #13)
+# can pin them in one place. Commented out until needed so the skeleton
+# build stays minimal.
+# atrium-api = { version = "0.25", default-features = false, features = ["bluesky", "namespace-appbsky", "namespace-comatproto"] }
+# atrium-xrpc = "0.12"
+# ureq = { version = "2.10", default-features = false, features = ["tls", "gzip"] }
+# rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "logging"] }
+# webpki-roots = "0.26"
+# futures = { version = "0.3", default-features = false, features = ["executor"] }
+
+# Patch overrides will be added during the spike step:
+# [patch.crates-io]
+# ring = { git = "https://github.com/vita-rust/ring", branch = "v0.17.14-vita" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+debug = true  # DWARF in ELF for addr2line; cargo-vita strips from VPK
+
+[profile.dev]
+# Plain dev (-O0) is too slow to be useful on Vita's Cortex-A9.
+# Bumping to -O1 keeps debuggability while staying tolerable.
+opt-level = 1

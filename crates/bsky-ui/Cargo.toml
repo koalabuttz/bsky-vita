@@ -1,0 +1,9 @@
+[package]
+name = "bsky-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Widgets and screens — Login, Timeline, Thread, Profile, Notifications, Compose"
+
+# Will depend on bsky-render, bsky-input, bsky-ime once those have substance.
+# Wired in Phase 1.

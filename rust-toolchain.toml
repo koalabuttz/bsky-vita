@@ -1,0 +1,4 @@
+[toolchain]
+channel = "nightly-2026-03-21"
+components = ["rust-src", "clippy", "rustfmt"]
+# No targets installed via rustup; armv7-sony-vita-newlibeabihf is built via -Z build-std.

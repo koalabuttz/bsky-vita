@@ -1,0 +1,6 @@
+[package]
+name = "bsky-models"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "AT Protocol type re-exports and extensions"

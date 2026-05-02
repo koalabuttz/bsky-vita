@@ -1,0 +1,12 @@
+[package]
+name = "bsky-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "vita2d FFI wrapper, glyph atlas, texture cache (Vita-only)"
+
+# vitasdk-sys is only pulled when targeting Vita. On host, this crate
+# compiles to empty stubs — its tests aren't useful but the workspace
+# still builds without VITASDK present.
+[target.'cfg(target_os = "vita")'.dependencies]
+vitasdk-sys = { workspace = true }

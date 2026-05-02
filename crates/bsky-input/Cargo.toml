@@ -1,0 +1,9 @@
+[package]
+name = "bsky-input"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "sceCtrl + sceTouch wrapper, button/touch event types (Vita-only)"
+
+[target.'cfg(target_os = "vita")'.dependencies]
+vitasdk-sys = { workspace = true }
