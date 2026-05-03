@@ -42,9 +42,11 @@ use atrium_api::app::bsky::actor::defs::ProfileViewDetailedData;
 use atrium_api::app::bsky::actor::get_profile;
 use atrium_api::app::bsky::feed::defs::FeedViewPost;
 use atrium_api::app::bsky::feed::get_timeline;
+use atrium_api::app::bsky::feed::like::RecordData as LikeRecordData;
 use atrium_api::app::bsky::feed::post::{RecordData as PostRecordData, ReplyRefData};
-use atrium_api::com::atproto::repo::create_record;
-use atrium_api::types::string::{AtIdentifier, Datetime, Nsid};
+use atrium_api::app::bsky::feed::repost::RecordData as RepostRecordData;
+use atrium_api::com::atproto::repo::{create_record, delete_record};
+use atrium_api::types::string::{AtIdentifier, Datetime, Nsid, RecordKey};
 use atrium_api::types::{LimitedNonZeroU8, Unknown};
 use atrium_xrpc::http::Request;
 use atrium_xrpc::HttpClient;
@@ -79,6 +81,16 @@ pub enum WorkRequest {
         text: String,
         reply_to: Option<ReplyTarget>,
     },
+    /// Create a like record (collection `app.bsky.feed.like`) for the
+    /// given post. Caller updates UI optimistically; the worker
+    /// confirms with the new record's URI.
+    CreateLike { post_uri: String, post_cid: String },
+    /// Delete a like by record-key (extracted from the like's AT-URI).
+    DeleteLike { rkey: String },
+    /// Create a repost record for the given post.
+    CreateRepost { post_uri: String, post_cid: String },
+    /// Delete a repost by record-key.
+    DeleteRepost { rkey: String },
 }
 
 /// Minimal data the caller provides for a reply. The worker translates
@@ -120,6 +132,11 @@ pub enum WorkResponse {
     /// AT-URI of the just-created post on success; error string on
     /// failure (lexicon validation, network, auth, etc.).
     PostCreated(Result<String, String>),
+    /// `Ok(Some(uri))` for CreateLike; `Ok(None)` for DeleteLike;
+    /// `Err` for either.
+    LikeChanged(Result<Option<String>, String>),
+    /// Same shape as `LikeChanged`, for repost create/delete.
+    RepostChanged(Result<Option<String>, String>),
 }
 
 /// Handle to the worker thread. Holds the channel ends and the thread's
@@ -242,6 +259,163 @@ fn handle_request(client: &AuthClient, req: WorkRequest) -> WorkResponse {
             WorkResponse::Image { url, bytes }
         }
         WorkRequest::CreatePost { text, reply_to } => create_post(client, text, reply_to),
+        WorkRequest::CreateLike {
+            post_uri,
+            post_cid,
+        } => create_engagement_record(
+            client,
+            "app.bsky.feed.like",
+            &post_uri,
+            &post_cid,
+            true,
+        ),
+        WorkRequest::DeleteLike { rkey } => {
+            delete_engagement_record(client, "app.bsky.feed.like", &rkey, true)
+        }
+        WorkRequest::CreateRepost {
+            post_uri,
+            post_cid,
+        } => create_engagement_record(
+            client,
+            "app.bsky.feed.repost",
+            &post_uri,
+            &post_cid,
+            false,
+        ),
+        WorkRequest::DeleteRepost { rkey } => {
+            delete_engagement_record(client, "app.bsky.feed.repost", &rkey, false)
+        }
+    }
+}
+
+/// Build + submit a like or repost record. `is_like` selects which
+/// record type + which response variant to wrap the result in.
+fn create_engagement_record(
+    client: &AuthClient,
+    collection_str: &str,
+    post_uri: &str,
+    post_cid: &str,
+    is_like: bool,
+) -> WorkResponse {
+    use atrium_api::com::atproto::repo::strong_ref::MainData as StrongRefData;
+    use atrium_api::types::string::Cid;
+
+    let did_str = match block_on(client.agent.did()) {
+        Some(d) => d.to_string(),
+        None => return wrap_engagement_err(is_like, "no session DID".into()),
+    };
+    let repo = match AtIdentifier::from_str(&did_str) {
+        Ok(id) => id,
+        Err(e) => return wrap_engagement_err(is_like, format!("DID parse: {e}")),
+    };
+    let cid = match Cid::from_str(post_cid) {
+        Ok(c) => c,
+        Err(e) => return wrap_engagement_err(is_like, format!("cid parse: {e}")),
+    };
+    let subject = StrongRefData {
+        cid,
+        uri: post_uri.to_string(),
+    }
+    .into();
+    let collection = match Nsid::from_str(collection_str) {
+        Ok(n) => n,
+        Err(e) => return wrap_engagement_err(is_like, format!("nsid: {e}")),
+    };
+
+    // Serialize the appropriate record type → JSON → inject $type → Unknown.
+    let mut json = if is_like {
+        match serde_json::to_value(LikeRecordData {
+            created_at: Datetime::now(),
+            subject,
+            via: None,
+        }) {
+            Ok(v) => v,
+            Err(e) => return wrap_engagement_err(is_like, format!("serialize: {e}")),
+        }
+    } else {
+        match serde_json::to_value(RepostRecordData {
+            created_at: Datetime::now(),
+            subject,
+            via: None,
+        }) {
+            Ok(v) => v,
+            Err(e) => return wrap_engagement_err(is_like, format!("serialize: {e}")),
+        }
+    };
+    if let serde_json::Value::Object(map) = &mut json {
+        map.insert(
+            "$type".to_string(),
+            serde_json::Value::String(collection_str.to_string()),
+        );
+    }
+    let unknown: Unknown = match serde_json::from_value(json) {
+        Ok(u) => u,
+        Err(e) => return wrap_engagement_err(is_like, format!("re-deserialize: {e}")),
+    };
+
+    let input = create_record::InputData {
+        collection,
+        record: unknown,
+        repo,
+        rkey: None,
+        swap_commit: None,
+        validate: None,
+    };
+    match block_on(client.agent.api.com.atproto.repo.create_record(input.into())) {
+        Ok(o) => wrap_engagement_ok(is_like, Some(o.data.uri)),
+        Err(e) => wrap_engagement_err(is_like, format!("{e}")),
+    }
+}
+
+/// Delete a like or repost record by rkey.
+fn delete_engagement_record(
+    client: &AuthClient,
+    collection_str: &str,
+    rkey_str: &str,
+    is_like: bool,
+) -> WorkResponse {
+    let did_str = match block_on(client.agent.did()) {
+        Some(d) => d.to_string(),
+        None => return wrap_engagement_err(is_like, "no session DID".into()),
+    };
+    let repo = match AtIdentifier::from_str(&did_str) {
+        Ok(id) => id,
+        Err(e) => return wrap_engagement_err(is_like, format!("DID parse: {e}")),
+    };
+    let collection = match Nsid::from_str(collection_str) {
+        Ok(n) => n,
+        Err(e) => return wrap_engagement_err(is_like, format!("nsid: {e}")),
+    };
+    let rkey = match RecordKey::from_str(rkey_str) {
+        Ok(k) => k,
+        Err(e) => return wrap_engagement_err(is_like, format!("rkey: {e}")),
+    };
+    let input = delete_record::InputData {
+        collection,
+        repo,
+        rkey,
+        swap_commit: None,
+        swap_record: None,
+    };
+    match block_on(client.agent.api.com.atproto.repo.delete_record(input.into())) {
+        Ok(_) => wrap_engagement_ok(is_like, None),
+        Err(e) => wrap_engagement_err(is_like, format!("{e}")),
+    }
+}
+
+fn wrap_engagement_ok(is_like: bool, uri: Option<String>) -> WorkResponse {
+    if is_like {
+        WorkResponse::LikeChanged(Ok(uri))
+    } else {
+        WorkResponse::RepostChanged(Ok(uri))
+    }
+}
+
+fn wrap_engagement_err(is_like: bool, msg: String) -> WorkResponse {
+    if is_like {
+        WorkResponse::LikeChanged(Err(msg))
+    } else {
+        WorkResponse::RepostChanged(Err(msg))
     }
 }
 

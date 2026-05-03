@@ -141,6 +141,25 @@ impl TimelineScreen {
         }
     }
 
+    /// Toggle the focused post's like state optimistically + dispatch
+    /// CreateLike / DeleteLike. The local state updates IMMEDIATELY so
+    /// the UI feels snappy; the worker confirms the new URI (for a
+    /// create) or just acks (for a delete). On Err the optimistic
+    /// change stays — user will see the real state on next refresh.
+    fn toggle_like(&mut self, ctx: &UiCtx) {
+        let Some(worker) = ctx.worker else { return };
+        let TimelineState::Loaded { posts, .. } = &mut self.state else { return };
+        let Some(post) = posts.get_mut(self.selected_idx) else { return };
+        toggle_engagement(post, worker, EngagementKind::Like);
+    }
+
+    fn toggle_repost(&mut self, ctx: &UiCtx) {
+        let Some(worker) = ctx.worker else { return };
+        let TimelineState::Loaded { posts, .. } = &mut self.state else { return };
+        let Some(post) = posts.get_mut(self.selected_idx) else { return };
+        toggle_engagement(post, worker, EngagementKind::Repost);
+    }
+
     /// Build a `ReplyTarget` for the currently-focused post. Phase 4.2
     /// MVP uses parent for both parent and root (acceptable for direct
     /// replies to top-level posts; thread replies render in the right
@@ -190,6 +209,103 @@ fn first_visible_idx(row_heights: &[i32], scroll_y: i32) -> usize {
         y += h;
     }
     row_heights.len().saturating_sub(1)
+}
+
+#[derive(Copy, Clone)]
+enum EngagementKind {
+    Like,
+    Repost,
+}
+
+/// Pending tap result from the touch hit-test pass. Built up while
+/// iterating posts (immutable borrow), then applied after the loop
+/// finishes (mutable borrow of `self`).
+enum TapAction {
+    OpenProfile(String),
+    ToggleLike(usize),
+    ToggleRepost(usize),
+}
+
+/// Sentinel URI used while a CreateLike / CreateRepost is in flight.
+/// The real AT-URI replaces it on `LikeChanged(Ok(Some(uri)))` /
+/// `RepostChanged(Ok(Some(uri)))` so subsequent un-like / un-repost
+/// can extract the rkey.
+const PENDING_URI: &str = "__pending__";
+
+/// Apply optimistic toggle + dispatch the matching Create/Delete worker
+/// request. If `kind == Like`, mutates `viewer.like` + `like_count`;
+/// `Repost` mutates `viewer.repost` + `repost_count`.
+fn toggle_engagement(
+    post: &mut FeedViewPost,
+    worker: &bsky_worker::Worker,
+    kind: EngagementKind,
+) {
+    use atrium_api::app::bsky::feed::defs::ViewerStateData;
+
+    let post_uri = post.post.uri.clone();
+    let post_cid = post.post.cid.as_ref().to_string();
+    let view = &mut post.post;
+    if view.viewer.is_none() {
+        view.viewer = Some(
+            ViewerStateData {
+                bookmarked: None,
+                embedding_disabled: None,
+                like: None,
+                pinned: None,
+                reply_disabled: None,
+                repost: None,
+                thread_muted: None,
+            }
+            .into(),
+        );
+    }
+    // Take the existing engagement URI (if any) and stamp the new
+    // optimistic state in the viewer. Done before mutating
+    // like_count/repost_count so the borrow on viewer ends first.
+    let existing = {
+        let viewer = view.viewer.as_mut().expect("viewer just initialized");
+        let slot = match kind {
+            EngagementKind::Like => &mut viewer.like,
+            EngagementKind::Repost => &mut viewer.repost,
+        };
+        let prev = slot.take();
+        if prev.is_none() {
+            *slot = Some(PENDING_URI.to_string());
+        }
+        prev
+    };
+    let count = match kind {
+        EngagementKind::Like => &mut view.like_count,
+        EngagementKind::Repost => &mut view.repost_count,
+    };
+    if let Some(existing_uri) = existing {
+        // Was engaged; now disengaged.
+        *count = Some((count.unwrap_or(0) - 1).max(0));
+        if existing_uri == PENDING_URI {
+            // Create still in flight — drop the un-engage. Server may
+            // end up with a stray record (Phase 4.x can queue a delete
+            // for after the create response arrives).
+            return;
+        }
+        let Some(rkey) = existing_uri.rsplit('/').next().map(String::from) else { return };
+        match kind {
+            EngagementKind::Like => worker.send(WorkRequest::DeleteLike { rkey }),
+            EngagementKind::Repost => worker.send(WorkRequest::DeleteRepost { rkey }),
+        }
+    } else {
+        // Was idle; now engaging.
+        *count = Some(count.unwrap_or(0) + 1);
+        match kind {
+            EngagementKind::Like => worker.send(WorkRequest::CreateLike {
+                post_uri,
+                post_cid,
+            }),
+            EngagementKind::Repost => worker.send(WorkRequest::CreateRepost {
+                post_uri,
+                post_cid,
+            }),
+        }
+    }
 }
 
 impl Screen for TimelineScreen {
@@ -244,7 +360,7 @@ impl Screen for TimelineScreen {
         // reply context), TRIANGLE = repost (4.3), SQUARE = compose
         // a top-level post.
         if ctx.pad.just_pressed(buttons::L1) {
-            // 4.3 — like the focused post.
+            self.toggle_like(ctx);
         }
         if ctx.pad.just_pressed(buttons::R1) {
             if let Some(reply) = self.focused_reply_target() {
@@ -262,7 +378,7 @@ impl Screen for TimelineScreen {
             }
         }
         if ctx.pad.just_pressed(buttons::TRIANGLE) {
-            // 4.3 — repost the focused post.
+            self.toggle_repost(ctx);
         }
         if ctx.pad.just_pressed(buttons::SQUARE) {
             return ScreenAction::Push(Box::new(ComposeScreen::new(
@@ -467,15 +583,21 @@ impl Screen for TimelineScreen {
             return ScreenAction::SwitchTab(target);
         }
 
-        // ─── 9. Tap detection on author region of the focused post or
-        //        any visible post → Push ProfileScreen for that actor.
-        //        Walk visible posts, hit-test the avatar / display-name
-        //        region (TEXT_LEFT is approximately the right edge of
-        //        that region; left edge is x=0 to include the avatar). ─
+        // ─── 9. Tap detection on visible posts. Three target zones:
+        //          - Author region (avatar + name) → Push ProfileScreen
+        //          - Likes count area → toggle_like
+        //          - Reposts count area → toggle_repost
+        //        Hit-tested per-frame against current scroll position. ─
         if !ctx.touches.is_empty() {
+            // Take snapshot of touches up-front so we can mutate state
+            // while iterating posts immutably.
+            let touches: Vec<_> = ctx.touches.iter().map(|t| (t.x, t.y)).collect();
+            let mut tap_action: Option<TapAction> = None;
             if let TimelineState::Loaded { posts, .. } = &self.state {
                 let mut y_probe = HEADER_H - self.scroll_y as i32;
-                for (post, &row_h) in posts.iter().zip(self.row_heights.iter()) {
+                for (idx, (post, &row_h)) in
+                    posts.iter().zip(self.row_heights.iter()).enumerate()
+                {
                     let row_bottom = y_probe + row_h;
                     if row_bottom > VIEWPORT_TOP && y_probe < VIEWPORT_BOTTOM {
                         let author_rect = Rect::new(
@@ -484,20 +606,58 @@ impl Screen for TimelineScreen {
                             TEXT_LEFT as f32,
                             AVATAR_SIZE as f32,
                         );
-                        if ctx
-                            .touches
-                            .iter()
-                            .any(|t| author_rect.contains(t.x, t.y))
+                        if touches.iter().any(|&(x, y)| author_rect.contains(x, y)) {
+                            tap_action = Some(TapAction::OpenProfile(
+                                post.post.author.handle.as_str().to_string(),
+                            ));
+                            break;
+                        }
+                        // Counts row tap zones. counts_y is body_y +
+                        // body_h + BODY_GAP — but body_h is computed
+                        // inside draw_post_row from wrapped text. We
+                        // approximate using row_h - FOOTER_H since the
+                        // counts row sits in the footer block.
+                        let counts_y = y_probe + row_h - FOOTER_H + 4;
+                        let counts_h = 24.0;
+                        // Roughly partition the bottom row into three:
+                        // likes 0..280, reposts 280..560, replies 560..840.
+                        let likes_rect =
+                            Rect::new(0.0, counts_y as f32, 280.0, counts_h);
+                        let reposts_rect =
+                            Rect::new(280.0, counts_y as f32, 280.0, counts_h);
+                        if touches.iter().any(|&(x, y)| likes_rect.contains(x, y)) {
+                            tap_action = Some(TapAction::ToggleLike(idx));
+                            break;
+                        }
+                        if touches.iter().any(|&(x, y)| reposts_rect.contains(x, y))
                         {
-                            let handle = post.post.author.handle.as_str().to_string();
-                            return ScreenAction::Push(Box::new(ProfileScreen::new(
-                                Arc::clone(&self.client),
-                                Some(handle),
-                            )));
+                            tap_action = Some(TapAction::ToggleRepost(idx));
+                            break;
                         }
                     }
                     y_probe += row_h;
                 }
+            }
+            match tap_action {
+                Some(TapAction::OpenProfile(handle)) => {
+                    return ScreenAction::Push(Box::new(ProfileScreen::new(
+                        Arc::clone(&self.client),
+                        Some(handle),
+                    )));
+                }
+                Some(TapAction::ToggleLike(idx)) => {
+                    let prev_sel = self.selected_idx;
+                    self.selected_idx = idx;
+                    self.toggle_like(ctx);
+                    self.selected_idx = prev_sel;
+                }
+                Some(TapAction::ToggleRepost(idx)) => {
+                    let prev_sel = self.selected_idx;
+                    self.selected_idx = idx;
+                    self.toggle_repost(ctx);
+                    self.selected_idx = prev_sel;
+                }
+                None => {}
             }
         }
 
@@ -554,6 +714,40 @@ impl Screen for TimelineScreen {
             // it's because the user popped out of compose before the
             // response arrived. Drop silently.
             WorkResponse::PostCreated(_) => {}
+            // Like/Repost responses confirm an in-flight optimistic
+            // toggle. Phase 4.3 doesn't track which post the response
+            // belongs to (no Vec lookup); on Ok(Some(uri)) we walk the
+            // posts and replace any PENDING_URI sentinel with the real
+            // URI in the matching field. On Err / Ok(None) nothing to do
+            // (delete-acks are no-ops; create-errs leave optimistic UI
+            // showing as engaged — user sees real state on refresh).
+            WorkResponse::LikeChanged(Ok(Some(uri))) => {
+                if let TimelineState::Loaded { posts, .. } = &mut self.state {
+                    for post in posts.iter_mut() {
+                        if let Some(viewer) = post.post.viewer.as_mut() {
+                            if viewer.like.as_deref() == Some(PENDING_URI) {
+                                viewer.like = Some(uri);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            WorkResponse::RepostChanged(Ok(Some(uri))) => {
+                if let TimelineState::Loaded { posts, .. } = &mut self.state {
+                    for post in posts.iter_mut() {
+                        if let Some(viewer) = post.post.viewer.as_mut() {
+                            if viewer.repost.as_deref() == Some(PENDING_URI) {
+                                viewer.repost = Some(uri);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            WorkResponse::LikeChanged(_) | WorkResponse::RepostChanged(_) => {
+                // Delete acks (Ok(None)) and errors land here; no-op.
+            }
         }
     }
 }
@@ -700,15 +894,45 @@ fn draw_post_row(
         emoji,
     );
 
-    // Counts row.
+    // Counts row, three segments rendered in sequence with per-segment
+    // color reflecting the viewer's engagement state. Liked / reposted
+    // segments render in ACCENT (Bsky-blue); idle in TEXT_MUTED.
     let likes = post.post.like_count.unwrap_or(0);
     let reposts = post.post.repost_count.unwrap_or(0);
     let replies = post.post.reply_count.unwrap_or(0);
-    let counts = format!(
-        "{likes} likes  ·  {reposts} reposts  ·  {replies} replies"
-    );
+    let liked = post
+        .post
+        .viewer
+        .as_ref()
+        .and_then(|v| v.like.as_deref())
+        .is_some();
+    let reposted = post
+        .post
+        .viewer
+        .as_ref()
+        .and_then(|v| v.repost.as_deref())
+        .is_some();
+    let likes_str = format!("{likes} likes");
+    let reposts_str = format!("{reposts} reposts");
+    let replies_str = format!("{replies} replies");
+    let sep_str = "  ·  ";
     let counts_y = body_y + body_h + BODY_GAP;
-    frame.draw_text(font, inner_left, counts_y, theme::TEXT_MUTED, 0.85, &counts);
+    let scale = 0.85;
+    // Sequential draw: each segment advances current_x by its width
+    // (measure_text — chained draw_text return values aren't reliable
+    // for next-x; same caveat as draw_word_with_emoji).
+    let mut cx = inner_left;
+    let likes_color = if liked { theme::ACCENT } else { theme::TEXT_MUTED };
+    frame.draw_text(font, cx, counts_y, likes_color, scale, &likes_str);
+    cx += frame.measure_text(font, scale, &likes_str).0;
+    frame.draw_text(font, cx, counts_y, theme::TEXT_MUTED, scale, sep_str);
+    cx += frame.measure_text(font, scale, sep_str).0;
+    let reposts_color = if reposted { theme::ACCENT } else { theme::TEXT_MUTED };
+    frame.draw_text(font, cx, counts_y, reposts_color, scale, &reposts_str);
+    cx += frame.measure_text(font, scale, &reposts_str).0;
+    frame.draw_text(font, cx, counts_y, theme::TEXT_MUTED, scale, sep_str);
+    cx += frame.measure_text(font, scale, sep_str).0;
+    frame.draw_text(font, cx, counts_y, theme::TEXT_MUTED, scale, &replies_str);
 
     // Separator: 1 px line at the bottom of the row.
     let sep_y = (y_top + row_h - 1) as f32;
