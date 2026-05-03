@@ -241,6 +241,7 @@ dependencies = [
  "bsky-net",
  "crossbeam-channel",
  "futures",
+ "serde_json",
 ]
 
 [[package]]

@@ -186,6 +186,7 @@ impl Screen for ProfileScreen {
                     self.inflight_avatar = None;
                 }
             }
+            WorkResponse::PostCreated(_) => {}
         }
     }
 }

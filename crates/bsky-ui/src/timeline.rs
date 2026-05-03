@@ -35,9 +35,10 @@ use bsky_input::buttons;
 use bsky_render::{
     theme, Color, EmojiAtlas, Font, Frame, Texture, TextureCache, SCREEN_HEIGHT, SCREEN_WIDTH,
 };
-use bsky_worker::{WorkRequest, WorkResponse};
+use bsky_worker::{ReplyTarget, WorkRequest, WorkResponse};
 
 use crate::cdn::avatar_thumbnail_jpeg;
+use crate::compose::ComposeScreen;
 use crate::profile::ProfileScreen;
 use crate::screen::{Screen, ScreenAction};
 use crate::tabbar::{TabBar, TopLevel, TAB_BAR_HEIGHT};
@@ -140,6 +141,28 @@ impl TimelineScreen {
         }
     }
 
+    /// Build a `ReplyTarget` for the currently-focused post. Phase 4.2
+    /// MVP uses parent for both parent and root (acceptable for direct
+    /// replies to top-level posts; thread replies render in the right
+    /// place visually but the `root` field may be slightly wrong).
+    /// Phase 4.4 (thread view) reads the parent's record.reply.root
+    /// and threads it through here.
+    fn focused_reply_target(&self) -> Option<ReplyTarget> {
+        let posts = match &self.state {
+            TimelineState::Loaded { posts, .. } => posts,
+            _ => return None,
+        };
+        let post = posts.get(self.selected_idx)?;
+        let uri = post.post.uri.clone();
+        let cid = post.post.cid.as_ref().to_string();
+        Some(ReplyTarget {
+            parent_uri: uri.clone(),
+            parent_cid: cid.clone(),
+            root_uri: uri,
+            root_cid: cid,
+        })
+    }
+
     /// True if the currently-selected post's row intersects the
     /// viewport at all (any pixel of it is on screen).
     fn is_selected_visible(&self) -> bool {
@@ -217,17 +240,36 @@ impl Screen for TimelineScreen {
                 selection_changed = true;
             }
         }
-        // L = like, R = reply, TRIANGLE = repost — handlers wired in
-        // 4.2 / 4.3. Stubbed here so the bindings exist + are visible
-        // in the build.
+        // L = like (4.3), R = reply (4.2 — Push ComposeScreen with
+        // reply context), TRIANGLE = repost (4.3), SQUARE = compose
+        // a top-level post.
         if ctx.pad.just_pressed(buttons::L1) {
             // 4.3 — like the focused post.
         }
         if ctx.pad.just_pressed(buttons::R1) {
-            // 4.2 — reply to the focused post (Push ComposeScreen).
+            if let Some(reply) = self.focused_reply_target() {
+                let handle = match &self.state {
+                    TimelineState::Loaded { posts, .. } => posts
+                        .get(self.selected_idx)
+                        .map(|p| p.post.author.handle.as_str().to_string()),
+                    _ => None,
+                };
+                return ScreenAction::Push(Box::new(ComposeScreen::new(
+                    Arc::clone(&self.client),
+                    Some(reply),
+                    handle,
+                )));
+            }
         }
         if ctx.pad.just_pressed(buttons::TRIANGLE) {
             // 4.3 — repost the focused post.
+        }
+        if ctx.pad.just_pressed(buttons::SQUARE) {
+            return ScreenAction::Push(Box::new(ComposeScreen::new(
+                Arc::clone(&self.client),
+                None,
+                None,
+            )));
         }
         // Analog-stick scroll. Use a deadzone-subtract curve so motion
         // just past the deadzone produces tiny movement (no binary
@@ -508,6 +550,10 @@ impl Screen for TimelineScreen {
                     // Leave url in inflight_avatars (don't retry).
                 }
             },
+            // PostCreated belongs to ComposeScreen — if it lands here
+            // it's because the user popped out of compose before the
+            // response arrived. Drop silently.
+            WorkResponse::PostCreated(_) => {}
         }
     }
 }

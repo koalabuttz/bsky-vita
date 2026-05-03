@@ -42,8 +42,10 @@ use atrium_api::app::bsky::actor::defs::ProfileViewDetailedData;
 use atrium_api::app::bsky::actor::get_profile;
 use atrium_api::app::bsky::feed::defs::FeedViewPost;
 use atrium_api::app::bsky::feed::get_timeline;
-use atrium_api::types::string::AtIdentifier;
-use atrium_api::types::LimitedNonZeroU8;
+use atrium_api::app::bsky::feed::post::{RecordData as PostRecordData, ReplyRefData};
+use atrium_api::com::atproto::repo::create_record;
+use atrium_api::types::string::{AtIdentifier, Datetime, Nsid};
+use atrium_api::types::{LimitedNonZeroU8, Unknown};
 use atrium_xrpc::http::Request;
 use atrium_xrpc::HttpClient;
 use bsky_auth::AuthClient;
@@ -69,6 +71,30 @@ pub enum WorkRequest {
     /// machinery. The URL is echoed back in the response so the main
     /// thread can dispatch the result to the right cache key.
     FetchImage { url: String },
+    /// Create a new top-level post or reply via
+    /// `com.atproto.repo.createRecord` with collection
+    /// `app.bsky.feed.post`. `reply_to: None` ⇒ top-level; `Some(_)` ⇒
+    /// reply (parent + root strong refs).
+    CreatePost {
+        text: String,
+        reply_to: Option<ReplyTarget>,
+    },
+}
+
+/// Minimal data the caller provides for a reply. The worker translates
+/// these strings into the typed `ReplyRefData` atrium expects. For
+/// thread replies, `root_*` should be the thread's actual root (read
+/// from the parent post's `record.reply.root` if present); for replies
+/// to a top-level post, parent and root are the same. Phase 4.2 MVP:
+/// callers simply pass parent for both — replies within a thread may
+/// render at the wrong place in some clients until 4.4 reads thread
+/// context.
+#[derive(Clone, Debug)]
+pub struct ReplyTarget {
+    pub parent_uri: String,
+    pub parent_cid: String,
+    pub root_uri: String,
+    pub root_cid: String,
 }
 
 /// One page of timeline posts plus the cursor for the next page. `cursor:
@@ -91,6 +117,9 @@ pub enum WorkResponse {
         url: String,
         bytes: Result<Vec<u8>, String>,
     },
+    /// AT-URI of the just-created post on success; error string on
+    /// failure (lexicon validation, network, auth, etc.).
+    PostCreated(Result<String, String>),
 }
 
 /// Handle to the worker thread. Holds the channel ends and the thread's
@@ -212,6 +241,122 @@ fn handle_request(client: &AuthClient, req: WorkRequest) -> WorkResponse {
             let bytes = fetch_image_bytes(&url);
             WorkResponse::Image { url, bytes }
         }
+        WorkRequest::CreatePost { text, reply_to } => create_post(client, text, reply_to),
+    }
+}
+
+/// Build + submit a new `app.bsky.feed.post` record. Returns the
+/// AT-URI of the created post on success.
+fn create_post(
+    client: &AuthClient,
+    text: String,
+    reply_to: Option<ReplyTarget>,
+) -> WorkResponse {
+    use atrium_api::com::atproto::repo::strong_ref::MainData as StrongRefData;
+    use atrium_api::types::string::Cid;
+
+    let did_str = match block_on(client.agent.did()) {
+        Some(d) => d.to_string(),
+        None => {
+            return WorkResponse::PostCreated(Err(
+                "agent has no session DID — not logged in".into(),
+            ));
+        }
+    };
+    let repo = match AtIdentifier::from_str(&did_str) {
+        Ok(id) => id,
+        Err(e) => {
+            return WorkResponse::PostCreated(Err(format!(
+                "DID parse failed for {did_str:?}: {e}"
+            )));
+        }
+    };
+
+    // Translate ReplyTarget → atrium ReplyRefData if present.
+    let reply = match reply_to {
+        Some(rt) => {
+            let parent_cid = match Cid::from_str(&rt.parent_cid) {
+                Ok(c) => c,
+                Err(e) => {
+                    return WorkResponse::PostCreated(Err(format!(
+                        "parent cid parse: {e}"
+                    )));
+                }
+            };
+            let root_cid = match Cid::from_str(&rt.root_cid) {
+                Ok(c) => c,
+                Err(e) => {
+                    return WorkResponse::PostCreated(Err(format!("root cid parse: {e}")));
+                }
+            };
+            Some(
+                ReplyRefData {
+                    parent: StrongRefData {
+                        cid: parent_cid,
+                        uri: rt.parent_uri,
+                    }
+                    .into(),
+                    root: StrongRefData {
+                        cid: root_cid,
+                        uri: rt.root_uri,
+                    }
+                    .into(),
+                }
+                .into(),
+            )
+        }
+        None => None,
+    };
+
+    let record = PostRecordData {
+        text,
+        created_at: Datetime::now(),
+        reply,
+        embed: None,
+        entities: None,
+        facets: None,
+        labels: None,
+        langs: None,
+        tags: None,
+    };
+
+    // atrium's typed RecordData doesn't carry `$type` — Bluesky's
+    // server requires it on createRecord. Round-trip through serde_json
+    // to inject it before converting to the wire-shape `Unknown`.
+    let mut json = match serde_json::to_value(&record) {
+        Ok(v) => v,
+        Err(e) => return WorkResponse::PostCreated(Err(format!("serialize: {e}"))),
+    };
+    if let serde_json::Value::Object(map) = &mut json {
+        map.insert(
+            "$type".to_string(),
+            serde_json::Value::String("app.bsky.feed.post".to_string()),
+        );
+    } else {
+        return WorkResponse::PostCreated(Err(
+            "post record didn't serialize as a JSON object".into(),
+        ));
+    }
+    let unknown: Unknown = match serde_json::from_value(json) {
+        Ok(u) => u,
+        Err(e) => return WorkResponse::PostCreated(Err(format!("re-deserialize: {e}"))),
+    };
+
+    let collection = match Nsid::from_str("app.bsky.feed.post") {
+        Ok(n) => n,
+        Err(e) => return WorkResponse::PostCreated(Err(format!("nsid parse: {e}"))),
+    };
+    let input = create_record::InputData {
+        collection,
+        record: unknown,
+        repo,
+        rkey: None,
+        swap_commit: None,
+        validate: None,
+    };
+    match block_on(client.agent.api.com.atproto.repo.create_record(input.into())) {
+        Ok(o) => WorkResponse::PostCreated(Ok(o.data.uri)),
+        Err(e) => WorkResponse::PostCreated(Err(format!("{e}"))),
     }
 }
 
