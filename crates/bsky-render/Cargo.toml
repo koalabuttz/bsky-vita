@@ -3,7 +3,8 @@ name = "bsky-render"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "vita2d FFI wrapper, glyph atlas, texture cache (Vita-only)"
+description = "vita2d FFI wrapper, frame primitives, font (PGF) rendering — Vita-only"
+build = "build.rs"
 
 # vitasdk-sys is only pulled when targeting Vita. On host, this crate
 # compiles to empty stubs — its tests aren't useful but the workspace

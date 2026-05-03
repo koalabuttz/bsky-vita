@@ -211,6 +211,7 @@ dependencies = [
  "bsky-auth",
  "bsky-models",
  "bsky-net",
+ "bsky-render",
  "futures",
  "serde_json",
  "vita-newlib-shims",

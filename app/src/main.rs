@@ -26,13 +26,32 @@ use futures::executor::block_on;
 const LOG_PATH: &str = "ux0:data/BSKY00001/spike.log";
 
 fn main() {
+    // Phase 1 auth flow runs before we open the screen — same as before.
+    // Once Phase 2.5 lands, this becomes screen-driven and no longer
+    // pre-flights the auth dance.
     let report = run_phase1();
     println!("{report}");
-
     let _ = std::fs::write(LOG_PATH, &report);
 
-    loop {
-        std::thread::sleep(std::time::Duration::from_secs(60));
+    // Phase 2.1: open vita2d, swap forever. No input yet (Phase 2.3).
+    // Using ACCENT (bright Bsky-blue) for the clear so a working render
+    // loop is unambiguous on screen — `theme::BACKGROUND` is dark slate
+    // and indistinguishable from a powered-off panel. Phase 2.2 will
+    // switch this back to BACKGROUND once we render text on top.
+    match bsky_render::Render::init() {
+        Ok(mut render) => {
+            render.set_clear_color(bsky_render::theme::ACCENT);
+            loop {
+                let _frame = render.begin_frame();
+                // Drop swaps buffers + waits for vblank (60 fps cap).
+            }
+        }
+        Err(e) => {
+            eprintln!("vita2d init failed: {e}; falling back to sleep loop");
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(60));
+            }
+        }
     }
 }
 
