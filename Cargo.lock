@@ -202,6 +202,11 @@ version = "0.1.0"
 [[package]]
 name = "bsky-ui"
 version = "0.1.0"
+dependencies = [
+ "bsky-ime",
+ "bsky-input",
+ "bsky-render",
+]
 
 [[package]]
 name = "bsky-vita-app"
@@ -214,6 +219,7 @@ dependencies = [
  "bsky-models",
  "bsky-net",
  "bsky-render",
+ "bsky-ui",
  "futures",
  "serde_json",
  "vita-newlib-shims",

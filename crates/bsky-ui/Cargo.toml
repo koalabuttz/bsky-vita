@@ -3,7 +3,9 @@ name = "bsky-ui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Widgets and screens — Login, Timeline, Thread, Profile, Notifications, Compose"
+description = "Immediate-mode widget tree + screens (Login, Profile, ...) — Vita-only at the FFI edges"
 
-# Will depend on bsky-render, bsky-input, bsky-ime once those have substance.
-# Wired in Phase 1.
+[dependencies]
+bsky-render = { path = "../bsky-render" }
+bsky-input  = { path = "../bsky-input" }
+bsky-ime    = { path = "../bsky-ime" }
