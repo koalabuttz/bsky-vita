@@ -36,10 +36,13 @@
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
+use std::str::FromStr;
+
 use atrium_api::app::bsky::actor::defs::ProfileViewDetailedData;
 use atrium_api::app::bsky::actor::get_profile;
 use atrium_api::app::bsky::feed::defs::FeedViewPost;
 use atrium_api::app::bsky::feed::get_timeline;
+use atrium_api::types::string::AtIdentifier;
 use atrium_api::types::LimitedNonZeroU8;
 use atrium_xrpc::http::Request;
 use atrium_xrpc::HttpClient;
@@ -52,9 +55,10 @@ use futures::executor::block_on;
 /// async operation; keep variants narrow (one network call each) so the
 /// response side stays tractable.
 pub enum WorkRequest {
-    /// Fetch the logged-in user's own profile. The DID is resolved from
-    /// the session inside the worker — callers don't need to know it.
-    GetOwnProfile,
+    /// Fetch a profile. `actor: None` means the logged-in user's own
+    /// profile (DID resolved from the session). `Some(handle_or_did)`
+    /// fetches that actor's profile.
+    FetchProfile { actor: Option<String> },
     /// Fetch a page of the home (Following) timeline. `cursor: None` for
     /// the first page; subsequent pages pass the cursor returned in the
     /// previous `TimelineBatch`. End-of-feed is signalled by a response
@@ -156,20 +160,29 @@ fn run(
 
 fn handle_request(client: &AuthClient, req: WorkRequest) -> WorkResponse {
     match req {
-        WorkRequest::GetOwnProfile => {
-            let did = match block_on(client.agent.did()) {
-                Some(d) => d,
-                None => {
-                    return WorkResponse::Profile(Err(
-                        "agent has no session DID — not logged in".into(),
-                    ));
+        WorkRequest::FetchProfile { actor } => {
+            // Resolve actor: None ⇒ session's own DID; Some(s) ⇒ use directly.
+            let actor_str = match actor {
+                Some(a) => a,
+                None => match block_on(client.agent.did()) {
+                    Some(d) => d.to_string(),
+                    None => {
+                        return WorkResponse::Profile(Err(
+                            "agent has no session DID — not logged in".into(),
+                        ));
+                    }
+                },
+            };
+            let at_id = match AtIdentifier::from_str(&actor_str) {
+                Ok(id) => id,
+                Err(e) => {
+                    return WorkResponse::Profile(Err(format!(
+                        "invalid actor identifier {actor_str:?}: {e}"
+                    )));
                 }
             };
             let result = block_on(client.agent.api.app.bsky.actor.get_profile(
-                get_profile::ParametersData {
-                    actor: did.into(),
-                }
-                .into(),
+                get_profile::ParametersData { actor: at_id }.into(),
             ));
             match result {
                 Ok(p) => WorkResponse::Profile(Ok(Box::new(p.data))),

@@ -1,24 +1,31 @@
 //! bsky-vita: PS Vita homebrew Bluesky client.
 //!
-//! Phase 3.1: worker-thread pattern for non-blocking PDS calls.
+//! Phase 4.1: navigation stack + tab bar + selection model.
 //!
 //! - `LoginScreen` (initial) checks for `session.json` on its first
 //!   frame; resumes if possible, otherwise shows the login form. Tap
 //!   Login → "Authenticating…" → emits `ScreenAction::AuthComplete`,
-//!   carrying the `Arc<AuthClient>` we use to spawn the worker thread.
-//! - `ProfileScreen` (post-auth) dispatches `WorkRequest::GetOwnProfile`
-//!   to the worker on its first frame; renders display name + handle +
-//!   counts when the response arrives.
+//!   carrying the `Arc<AuthClient>` we use to spawn the worker thread
+//!   and retain for top-level screen construction (`SwitchTab`).
+//! - Top-level screens (TimelineScreen, ProfileScreen-of-self,
+//!   NotificationsScreen, SearchScreen) render the bottom tab bar and
+//!   live in the `screen_stack`. Tab tap → `SwitchTab(target)` →
+//!   stack truncates to (or pushes a fresh) instance of that target.
+//! - Sub-screens (Compose, Thread, ProfileScreen-of-other) push onto
+//!   the stack; CIRCLE pops them.
 //!
-//! Network calls now happen on a background thread; the render loop
-//! drains responses via `worker.try_recv()` each frame and never blocks.
-//! `Screen::after_present` survives for the pre-worker LoginScreen path
-//! (`try_resume_existing_session`, `login_with_password`) — those run
-//! *before* the worker exists.
+//! Network calls happen on a background worker thread; the render loop
+//! drains responses via `worker.try_recv()` each frame and never
+//! blocks. `Screen::after_present` survives for the pre-worker
+//! LoginScreen path (resume / login) — those run *before* the worker
+//! exists.
 
+use std::sync::Arc;
+
+use bsky_auth::AuthClient;
 use bsky_input::{Pad, Touch};
 use bsky_render::{EmojiAtlas, Render, Texture, TextureCache};
-use bsky_ui::{LoginScreen, Screen, ScreenAction, UiCtx};
+use bsky_ui::{LoginScreen, ProfileScreen, Screen, ScreenAction, TimelineScreen, TopLevel, UiCtx};
 use bsky_worker::{WorkResponse, Worker};
 
 fn main() {
@@ -32,10 +39,6 @@ fn main() {
         }
     };
     render.set_clear_color(bsky_render::theme::BACKGROUND);
-    // Phase 3.3: try Inter (TTF, FreeType) first; fall back to PGF if the
-    // bundled asset is missing or vita2d's font loader rejects it. PGF
-    // rendering still works and produces the pre-3.3 visual; the user
-    // sees a log line explaining the fallback.
     let font = match render.load_inter_ttf("app0:Inter-Regular.ttf") {
         Ok(f) => f,
         Err(e) => {
@@ -49,10 +52,6 @@ fn main() {
         }
     };
 
-    // Phase 3.4: optional Twemoji color-emoji atlas. If the asset is
-    // missing on the device, emoji codepoints render as Inter fallback
-    // (tofu) — app boots fine. Run `make push-emoji` to upload the
-    // ~2.5 MB atlas separately from `make run`'s eboot.bin push.
     let emoji_atlas: Option<EmojiAtlas> = match EmojiAtlas::from_path("app0:twemoji.png") {
         Ok(a) => Some(a),
         Err(e) => {
@@ -64,10 +63,6 @@ fn main() {
         }
     };
 
-    // Phase 3.5: optional avatar circular-mask asset. ~500 bytes; fakes
-    // circular avatars by overlaying transparent-disk + opaque-corners
-    // on top of the rendered avatar. Missing → square avatars (still
-    // legible, just less polished).
     let avatar_mask: Option<Texture> = match Texture::from_png_file("app0:avatar_mask_96.png") {
         Ok(t) => Some(t),
         Err(e) => {
@@ -80,19 +75,18 @@ fn main() {
     let touch = Touch::init();
     let mut ime = bsky_ime::Ime::new();
 
-    // Always start with LoginScreen — its CheckingSession initial state
-    // handles resume-from-session.json on the first frame.
-    let mut screen: Box<dyn Screen> = Box::new(LoginScreen::new());
+    // Navigation stack. Top of the stack is the currently-rendered
+    // screen. LoginScreen is the initial root; AuthComplete clears the
+    // stack and pushes the post-auth top-level screen.
+    let mut screen_stack: Vec<Box<dyn Screen>> = vec![Box::new(LoginScreen::new())];
 
-    // Worker is spawned the first time a screen returns `AuthComplete`
-    // (LoginScreen → ProfileScreen). Pre-auth screens get `worker: None`
-    // in their `UiCtx`.
+    // Worker is spawned the first time a screen returns `AuthComplete`.
     let mut worker: Option<Worker> = None;
+    // Held alongside the worker so we can construct fresh top-level
+    // screens (TimelineScreen, ProfileScreen, …) when a `SwitchTab`
+    // action lands on a tab without an existing instance in the stack.
+    let mut auth_client: Option<Arc<AuthClient>> = None;
 
-    // Phase 3.5: LRU cache for decoded image textures (avatars; later,
-    // post embeds). 64 entries × ~37 KB worst case ≈ 2.4 MB GXM heap.
-    // Mutations happen here in main.rs after the worker drains; screens
-    // get a `&TextureCache` for read-only lookup.
     let mut texture_cache = TextureCache::new(64);
 
     loop {
@@ -110,32 +104,28 @@ fn main() {
         // Render + collect transition action. The Frame's Drop happens
         // when this block ends, which presents the buffer.
         let action = {
+            let top = screen_stack
+                .last_mut()
+                .expect("screen stack is never empty");
             let mut frame = render.begin_frame();
-            let action = screen.frame(&mut frame, &font, &ctx, &mut ime);
+            let action = top.frame(&mut frame, &font, &ctx, &mut ime);
             if ime.is_active() {
                 frame.pump_ime();
             }
             action
         };
 
-        // Frame is now on the display; safe to do blocking work for
-        // pre-worker screens (LoginScreen).
-        screen.after_present();
+        // Pre-worker blocking work for LoginScreen.
+        if let Some(top) = screen_stack.last_mut() {
+            top.after_present();
+        }
 
         // Drain any worker responses produced since the last frame and
-        // hand them to the active screen. Typically 0–1 per frame, but
-        // we loop in case multiple complete simultaneously.
-        //
-        // For `Image` responses we decode the bytes into a `Texture` and
-        // insert into the cache here, BEFORE forwarding to the screen —
-        // so when `handle_worker_response` runs, the cache is already
-        // populated and the screen just needs to clear its in-flight set.
+        // hand them to the TOP screen. For `Image` responses, decode
+        // and insert into the cache before forwarding so screens can
+        // clear inflight tracking after the cache is already populated.
         if let Some(w) = worker.as_ref() {
             while let Some(resp) = w.try_recv() {
-                // For Image responses, decode + insert here. If decode
-                // fails, rewrite the response as Err so the screen knows
-                // the URL didn't actually become available — otherwise
-                // it'd think the fetch succeeded and would never re-try.
                 let resp = if let WorkResponse::Image {
                     url,
                     bytes: Ok(b),
@@ -151,22 +141,71 @@ fn main() {
                 } else {
                     resp
                 };
-                screen.handle_worker_response(resp);
+                if let Some(top) = screen_stack.last_mut() {
+                    top.handle_worker_response(resp);
+                }
             }
         }
 
         match action {
             ScreenAction::None => {}
-            ScreenAction::Goto(next) => {
-                screen = next;
+            ScreenAction::Push(next) => {
+                screen_stack.push(next);
+            }
+            ScreenAction::Pop => {
+                if screen_stack.len() > 1 {
+                    screen_stack.pop();
+                }
+            }
+            ScreenAction::SwitchTab(target) => {
+                handle_switch_tab(target, &mut screen_stack, auth_client.as_ref());
             }
             ScreenAction::AuthComplete { client, next } => {
-                // First (and currently only) auth transition: spawn the
-                // worker now that we have an AuthClient. Subsequent
-                // re-auths would replace the worker; not needed in 3.1.
-                worker = Some(Worker::spawn(client));
-                screen = next;
+                worker = Some(Worker::spawn(Arc::clone(&client)));
+                auth_client = Some(client);
+                screen_stack.clear();
+                screen_stack.push(next);
             }
+        }
+    }
+}
+
+/// Tab-bar tap handler: walk the stack from the bottom up looking for
+/// a screen whose `top_level()` matches `target`. If found, truncate
+/// the stack to (and including) that screen — preserves its in-memory
+/// state. If not found, construct a fresh top-level instance and push
+/// it as the new root (replacing the existing stack since top-levels
+/// are mutually exclusive at the root level).
+fn handle_switch_tab(
+    target: TopLevel,
+    stack: &mut Vec<Box<dyn Screen>>,
+    auth: Option<&Arc<AuthClient>>,
+) {
+    if let Some(idx) = stack.iter().position(|s| s.top_level() == Some(target)) {
+        stack.truncate(idx + 1);
+        return;
+    }
+    let Some(client) = auth else {
+        eprintln!("SwitchTab({target:?}) before auth — ignoring");
+        return;
+    };
+    let next = make_top_level(target, Arc::clone(client));
+    stack.clear();
+    stack.push(next);
+}
+
+/// Construct a fresh instance of a top-level screen for `target`.
+/// Notifications and Search screens land in 4.6 / 4.7 — for now they
+/// fall back to TimelineScreen so the app stays usable while those
+/// sub-phases are pending.
+fn make_top_level(target: TopLevel, client: Arc<AuthClient>) -> Box<dyn Screen> {
+    match target {
+        TopLevel::Home => Box::new(TimelineScreen::new(client)),
+        TopLevel::Profile => Box::new(ProfileScreen::new(client, None)),
+        TopLevel::Search | TopLevel::Notifications => {
+            // TODO: 4.6 NotificationsScreen, 4.7 SearchScreen.
+            eprintln!("{target:?} screen not implemented yet — falling back to Home");
+            Box::new(TimelineScreen::new(client))
         }
     }
 }

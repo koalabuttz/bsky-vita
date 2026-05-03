@@ -40,15 +40,18 @@ use bsky_worker::{WorkRequest, WorkResponse};
 use crate::cdn::avatar_thumbnail_jpeg;
 use crate::profile::ProfileScreen;
 use crate::screen::{Screen, ScreenAction};
-use crate::widget::UiCtx;
+use crate::tabbar::{TabBar, TopLevel, TAB_BAR_HEIGHT};
+use crate::widget::{Rect, UiCtx};
 
 /// Sticky header height (px). Posts render below this; the header is
 /// drawn last so it covers any content that's scrolled into its zone.
 const HEADER_H: i32 = 40;
 
-/// Viewport for the post list (everything below the header).
+/// Viewport for the post list — between the sticky header at the top
+/// and the tab bar at the bottom.
 const VIEWPORT_TOP: i32 = HEADER_H;
-const VIEWPORT_H: i32 = SCREEN_HEIGHT - HEADER_H;
+const VIEWPORT_BOTTOM: i32 = SCREEN_HEIGHT - TAB_BAR_HEIGHT;
+const VIEWPORT_H: i32 = VIEWPORT_BOTTOM - VIEWPORT_TOP;
 
 /// Side margins inside a post row.
 const ROW_PAD_X: i32 = 16;
@@ -114,6 +117,12 @@ pub struct TimelineScreen {
     /// after eviction). On Err response → kept (don't retry-storm a
     /// failing URL during this session).
     inflight_avatars: HashSet<String>,
+    /// Index into `posts` of the currently-focused row. D-pad up/down
+    /// moves this; gamepad shortcuts (L = like, R = reply, TRIANGLE =
+    /// repost) act on this row. The viewport auto-scrolls to keep the
+    /// focused row visible. Defaults to 0 on screen entry.
+    selected_idx: usize,
+    tab_bar: TabBar,
 }
 
 impl TimelineScreen {
@@ -126,8 +135,38 @@ impl TimelineScreen {
             fetching_more: false,
             row_heights: Vec::new(),
             inflight_avatars: HashSet::new(),
+            selected_idx: 0,
+            tab_bar: TabBar::new(TopLevel::Home),
         }
     }
+
+    /// True if the currently-selected post's row intersects the
+    /// viewport at all (any pixel of it is on screen).
+    fn is_selected_visible(&self) -> bool {
+        if self.selected_idx >= self.row_heights.len() {
+            return true;
+        }
+        let row_top: i32 = self.row_heights[..self.selected_idx].iter().sum();
+        let row_h = self.row_heights[self.selected_idx];
+        let view_top = self.scroll_y as i32;
+        let view_bottom = view_top + VIEWPORT_H;
+        row_top + row_h > view_top && row_top < view_bottom
+    }
+}
+
+/// First post index whose row intersects the viewport given the
+/// current `scroll_y`. Used to snap the selection when the user moves
+/// the analog stick away from the selected post and then presses
+/// d-pad.
+fn first_visible_idx(row_heights: &[i32], scroll_y: i32) -> usize {
+    let mut y = 0;
+    for (i, &h) in row_heights.iter().enumerate() {
+        if y + h > scroll_y {
+            return i;
+        }
+        y += h;
+    }
+    row_heights.len().saturating_sub(1)
 }
 
 impl Screen for TimelineScreen {
@@ -146,17 +185,49 @@ impl Screen for TimelineScreen {
             }
         }
 
-        // ─── 2. Input: scroll + back. ──────────────────────────────────
-        if ctx.pad.just_pressed(buttons::CIRCLE) {
-            return ScreenAction::Goto(Box::new(ProfileScreen::new(
-                Arc::clone(&self.client),
-            )));
+        // ─── 2. Input: selection + scroll. ─────────────────────────────
+        // CIRCLE on top-level is a no-op (tab bar handles top-level
+        // navigation; only pushed sub-screens consume CIRCLE for back).
+        // D-pad up/down moves the focused-post selection; auto-scroll
+        // happens in step 4. Analog stick still does pixel-level
+        // scrolling independently of selection.
+        let post_count = match &self.state {
+            TimelineState::Loaded { posts, .. } => posts.len(),
+            _ => 0,
+        };
+        let mut selection_changed = false;
+        if post_count > 0
+            && (ctx.pad.just_pressed(buttons::UP) || ctx.pad.just_pressed(buttons::DOWN))
+        {
+            // If the current selection has scrolled off-screen (analog
+            // stick moved the viewport away), snap selection to the
+            // first visible post BEFORE applying the d-pad direction.
+            // Without this, d-pad press auto-scrolls back to the
+            // off-screen selection — visible jump.
+            if !self.is_selected_visible() {
+                self.selected_idx = first_visible_idx(&self.row_heights, self.scroll_y as i32);
+                selection_changed = true;
+            }
+            if ctx.pad.just_pressed(buttons::UP) && self.selected_idx > 0 {
+                self.selected_idx -= 1;
+                selection_changed = true;
+            }
+            if ctx.pad.just_pressed(buttons::DOWN) && self.selected_idx + 1 < post_count {
+                self.selected_idx += 1;
+                selection_changed = true;
+            }
         }
-        if ctx.pad.just_pressed(buttons::UP) {
-            self.scroll_y -= DPAD_STEP;
+        // L = like, R = reply, TRIANGLE = repost — handlers wired in
+        // 4.2 / 4.3. Stubbed here so the bindings exist + are visible
+        // in the build.
+        if ctx.pad.just_pressed(buttons::L1) {
+            // 4.3 — like the focused post.
         }
-        if ctx.pad.just_pressed(buttons::DOWN) {
-            self.scroll_y += DPAD_STEP;
+        if ctx.pad.just_pressed(buttons::R1) {
+            // 4.2 — reply to the focused post (Push ComposeScreen).
+        }
+        if ctx.pad.just_pressed(buttons::TRIANGLE) {
+            // 4.3 — repost the focused post.
         }
         // Analog-stick scroll. Use a deadzone-subtract curve so motion
         // just past the deadzone produces tiny movement (no binary
@@ -171,6 +242,9 @@ impl Screen for TimelineScreen {
             let effective = (mag - dz) * sign;
             self.scroll_y += effective / STICK_DIVISOR;
         }
+        // Suppress unused-const warnings for DPAD_STEP — it's now
+        // implicit in the auto-scroll math below.
+        let _ = DPAD_STEP;
 
         // ─── 3. Lazy-measure row heights for any newly-arrived posts. ─
         if let TimelineState::Loaded { posts, .. } = &self.state {
@@ -181,9 +255,27 @@ impl Screen for TimelineScreen {
             }
         }
 
-        // ─── 4. Compute layout: total content height + scroll clamp. ──
+        // ─── 4. Compute layout: total content height + scroll clamp.
+        //        Auto-scroll only when d-pad selection just changed,
+        //        so analog-stick scroll isn't fighting the selection
+        //        snap every frame. ────────────────────────────────────
         let total_h: i32 = self.row_heights.iter().sum();
         let max_scroll = (total_h - VIEWPORT_H).max(0) as f32;
+        if selection_changed && self.selected_idx < self.row_heights.len() {
+            // Top-y of the selected row in content coords (before
+            // subtracting scroll_y).
+            let row_top: i32 = self.row_heights[..self.selected_idx].iter().sum();
+            let row_h = self.row_heights[self.selected_idx];
+            let view_top = self.scroll_y as i32;
+            let view_bottom = view_top + VIEWPORT_H;
+            const SCROLL_MARGIN: i32 = 50;
+            if row_top < view_top + SCROLL_MARGIN {
+                self.scroll_y = (row_top - SCROLL_MARGIN).max(0) as f32;
+            } else if row_top + row_h > view_bottom - SCROLL_MARGIN {
+                self.scroll_y =
+                    (row_top + row_h + SCROLL_MARGIN - VIEWPORT_H).max(0) as f32;
+            }
+        }
         if self.scroll_y < 0.0 {
             self.scroll_y = 0.0;
         }
@@ -269,6 +361,7 @@ impl Screen for TimelineScreen {
                         ctx.emoji,
                         ctx.texture_cache,
                         ctx.avatar_mask,
+                        self.selected_idx,
                     );
                     if self.fetching_more {
                         let bottom_y = HEADER_H + total_h - self.scroll_y as i32 + 8;
@@ -314,11 +407,10 @@ impl Screen for TimelineScreen {
             }
         }
 
-        // ─── 7. Sticky header (drawn last, on top of any post row that
-        //        scrolled up into the header zone). ───────────────────
+        // ─── 7. Sticky header (drawn after posts so it covers any row
+        //        that scrolled up into its zone). ──────────────────────
         frame.fill_rect(0.0, 0.0, SCREEN_WIDTH as f32, HEADER_H as f32, theme::FIELD_BG);
         frame.draw_text_centered(font, 26, theme::TEXT_PRIMARY, 1.1, "Following");
-        // Bottom edge of header (1px separator).
         frame.fill_rect(
             0.0,
             HEADER_H as f32 - 1.0,
@@ -327,7 +419,51 @@ impl Screen for TimelineScreen {
             theme::TEXT_MUTED,
         );
 
+        // ─── 8. Tab bar (last — covers any row that scrolled into its
+        //        zone). Tap → switch top-level. ─────────────────────────
+        if let Some(target) = self.tab_bar.render(frame, font, ctx) {
+            return ScreenAction::SwitchTab(target);
+        }
+
+        // ─── 9. Tap detection on author region of the focused post or
+        //        any visible post → Push ProfileScreen for that actor.
+        //        Walk visible posts, hit-test the avatar / display-name
+        //        region (TEXT_LEFT is approximately the right edge of
+        //        that region; left edge is x=0 to include the avatar). ─
+        if !ctx.touches.is_empty() {
+            if let TimelineState::Loaded { posts, .. } = &self.state {
+                let mut y_probe = HEADER_H - self.scroll_y as i32;
+                for (post, &row_h) in posts.iter().zip(self.row_heights.iter()) {
+                    let row_bottom = y_probe + row_h;
+                    if row_bottom > VIEWPORT_TOP && y_probe < VIEWPORT_BOTTOM {
+                        let author_rect = Rect::new(
+                            0.0,
+                            (y_probe + ROW_PAD_Y) as f32,
+                            TEXT_LEFT as f32,
+                            AVATAR_SIZE as f32,
+                        );
+                        if ctx
+                            .touches
+                            .iter()
+                            .any(|t| author_rect.contains(t.x, t.y))
+                        {
+                            let handle = post.post.author.handle.as_str().to_string();
+                            return ScreenAction::Push(Box::new(ProfileScreen::new(
+                                Arc::clone(&self.client),
+                                Some(handle),
+                            )));
+                        }
+                    }
+                    y_probe += row_h;
+                }
+            }
+        }
+
         ScreenAction::None
+    }
+
+    fn top_level(&self) -> Option<TopLevel> {
+        Some(TopLevel::Home)
     }
 
     fn handle_worker_response(&mut self, resp: WorkResponse) {
@@ -405,12 +541,23 @@ fn draw_post_list(
     emoji: Option<&EmojiAtlas>,
     cache: &TextureCache,
     avatar_mask: Option<&Texture>,
+    selected_idx: usize,
 ) {
     let mut y = HEADER_H - scroll_y as i32;
-    for (post, &row_h) in posts.iter().zip(row_heights.iter()) {
+    for (i, (post, &row_h)) in posts.iter().zip(row_heights.iter()).enumerate() {
         let row_bottom = y + row_h;
-        if row_bottom > VIEWPORT_TOP && y < SCREEN_HEIGHT {
-            draw_post_row(frame, font, post, y, row_h, emoji, cache, avatar_mask);
+        if row_bottom > VIEWPORT_TOP && y < VIEWPORT_BOTTOM {
+            draw_post_row(
+                frame,
+                font,
+                post,
+                y,
+                row_h,
+                emoji,
+                cache,
+                avatar_mask,
+                i == selected_idx,
+            );
         }
         y += row_h;
     }
@@ -418,6 +565,8 @@ fn draw_post_list(
 
 /// Render one post row at the given top-y. The row is positioned in the
 /// full screen-width column with `ROW_PAD_X` margin on each side.
+/// `is_selected` lights up a left-edge ACCENT bar to indicate keyboard
+/// focus.
 fn draw_post_row(
     frame: &mut Frame,
     font: &Font,
@@ -427,10 +576,30 @@ fn draw_post_row(
     emoji: Option<&EmojiAtlas>,
     cache: &TextureCache,
     avatar_mask: Option<&Texture>,
+    is_selected: bool,
 ) {
     let row_right = SCREEN_WIDTH;
     let inner_left = TEXT_LEFT;
     let inner_w = row_right - inner_left - ROW_PAD_X;
+
+    // Selection highlight: faint background tint over the row + 3 px
+    // ACCENT-color bar on the left edge.
+    if is_selected {
+        frame.fill_rect(
+            0.0,
+            y_top as f32,
+            SCREEN_WIDTH as f32,
+            row_h as f32,
+            theme::FIELD_BG,
+        );
+        frame.fill_rect(
+            0.0,
+            y_top as f32,
+            3.0,
+            row_h as f32,
+            theme::ACCENT,
+        );
+    }
 
     // Avatar slot: 48×48 in the left margin, top-aligned with text top.
     let avatar_x = ROW_PAD_X;

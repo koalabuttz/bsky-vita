@@ -21,8 +21,8 @@ use bsky_worker::{WorkRequest, WorkResponse};
 
 use crate::cdn::avatar_thumbnail_jpeg;
 use crate::screen::{Screen, ScreenAction};
-use crate::timeline::TimelineScreen;
-use crate::widget::{button, ButtonState, Rect, UiCtx};
+use crate::tabbar::{TabBar, TopLevel};
+use crate::widget::UiCtx;
 
 const AVATAR_SIZE: i32 = 96;
 
@@ -37,26 +37,41 @@ enum ProfileState {
 
 pub struct ProfileScreen {
     client: Arc<AuthClient>,
+    /// `None` ⇒ logged-in user's own profile (worker resolves DID from
+    /// the session). `Some(handle_or_did)` ⇒ render that actor's
+    /// profile.
+    actor: Option<String>,
     state: ProfileState,
-    /// Tracks whether we've already sent the `GetOwnProfile` request this
-    /// session. Without this we'd re-dispatch every frame while the
-    /// response is in flight.
+    /// Tracks whether we've already sent the `FetchProfile` request
+    /// this session. Without this we'd re-dispatch every frame while
+    /// the response is in flight.
     dispatched: bool,
-    timeline_btn: ButtonState,
     /// Avatar URL we've dispatched a fetch for; suppresses re-dispatch
     /// while in flight. Cleared on `WorkResponse::Image`.
     inflight_avatar: Option<String>,
+    /// Tab bar (only rendered for the own-profile / top-level instance;
+    /// pushed-sub-screen instances with `actor: Some(_)` skip rendering
+    /// it because they're below the tab bar in the navigation stack).
+    tab_bar: TabBar,
 }
 
 impl ProfileScreen {
-    pub fn new(client: Arc<AuthClient>) -> Self {
+    /// Construct a ProfileScreen for `actor`. `None` ⇒ own profile;
+    /// `Some(handle_or_did)` ⇒ that actor.
+    pub fn new(client: Arc<AuthClient>, actor: Option<String>) -> Self {
         Self {
             client,
+            actor,
             state: ProfileState::Pending,
             dispatched: false,
-            timeline_btn: ButtonState::default(),
             inflight_avatar: None,
+            tab_bar: TabBar::new(TopLevel::Profile),
         }
+    }
+
+    /// True if this is the user's own-profile (top-level) instance.
+    fn is_own(&self) -> bool {
+        self.actor.is_none()
     }
 }
 
@@ -75,7 +90,9 @@ impl Screen for ProfileScreen {
         // a panic.
         if !self.dispatched {
             if let Some(worker) = ctx.worker {
-                worker.send(WorkRequest::GetOwnProfile);
+                worker.send(WorkRequest::FetchProfile {
+                    actor: self.actor.clone(),
+                });
                 self.dispatched = true;
             }
         }
@@ -99,7 +116,6 @@ impl Screen for ProfileScreen {
             }
         }
 
-        let mut timeline_clicked = false;
         match &self.state {
             ProfileState::Pending => {
                 frame.draw_text_centered(
@@ -112,23 +128,9 @@ impl Screen for ProfileScreen {
             }
             ProfileState::Loaded(p) => {
                 draw_profile(frame, font, p, ctx.texture_cache, ctx.avatar_mask);
-                let btn_w = 160.0;
-                let btn_rect = Rect::new(
-                    (SCREEN_WIDTH as f32 - btn_w) / 2.0,
-                    395.0,
-                    btn_w,
-                    48.0,
-                );
-                timeline_clicked = button(
-                    frame,
-                    font,
-                    btn_rect,
-                    "Timeline",
-                    &mut self.timeline_btn,
-                    ctx,
-                    true,
-                );
-                draw_session_footer(frame, font, &self.client);
+                if self.is_own() {
+                    draw_session_footer(frame, font, &self.client);
+                }
             }
             ProfileState::Error(msg) => {
                 frame.draw_text_centered(
@@ -148,13 +150,26 @@ impl Screen for ProfileScreen {
             }
         }
 
-        if timeline_clicked {
-            return ScreenAction::Goto(Box::new(TimelineScreen::new(Arc::clone(
-                &self.client,
-            ))));
+        // Top-level (own profile) renders the tab bar and treats CIRCLE
+        // as a no-op. Pushed sub-screen (other actor's profile) skips
+        // the tab bar and pops on CIRCLE.
+        if self.is_own() {
+            if let Some(target) = self.tab_bar.render(frame, font, ctx) {
+                return ScreenAction::SwitchTab(target);
+            }
+        } else if ctx.pad.just_pressed(bsky_input::buttons::CIRCLE) {
+            return ScreenAction::Pop;
         }
 
         ScreenAction::None
+    }
+
+    fn top_level(&self) -> Option<TopLevel> {
+        if self.is_own() {
+            Some(TopLevel::Profile)
+        } else {
+            None
+        }
     }
 
     fn handle_worker_response(&mut self, resp: WorkResponse) {
@@ -240,15 +255,49 @@ fn draw_profile(
     let handle = format!("@{}", p.handle.as_str());
     frame.draw_text_centered(font, 240, theme::TEXT_MUTED, 1.1, &handle);
 
-    // Description (truncated, single line).
+    // Description (multi-line wrapped, emoji-aware). Constrained to a
+    // 4-line height budget so the counts row below stays in place; the
+    // 4th line truncates with an ellipsis if there's more.
     if let Some(desc) = p.description.as_deref().filter(|s| !s.is_empty()) {
-        let head = desc.chars().take(80).collect::<String>();
-        let line = if desc.chars().count() > 80 {
-            format!("{head}…")
+        const DESC_MAX_W: i32 = SCREEN_WIDTH - 80;
+        const DESC_MAX_LINES: usize = 4;
+        let line_h = frame.measure_text(font, 0.95, "Hg").1 + 4;
+        let max_h = DESC_MAX_LINES as i32 * line_h;
+        // Truncate to fit the height budget by repeatedly trimming
+        // characters until the wrapped text fits.
+        let mut clipped = desc.to_string();
+        while frame.measure_text_wrapped_with_emoji(font, DESC_MAX_W, 0.95, &clipped, None) > max_h
+        {
+            // Pop chars from the end until it fits; preserve trailing ellipsis.
+            clipped.pop();
+            // Strip a trailing ellipsis if present so we don't accumulate.
+            if clipped.ends_with('…') {
+                clipped.pop();
+            }
+            if clipped.is_empty() {
+                break;
+            }
+        }
+        let final_text = if clipped.len() < desc.len() {
+            // Trim a final word boundary for cleaner ellipsis placement.
+            while !clipped.is_empty() && !clipped.ends_with(char::is_whitespace) {
+                clipped.pop();
+            }
+            format!("{}…", clipped.trim_end())
         } else {
-            head
+            clipped
         };
-        frame.draw_text_centered(font, 290, theme::TEXT_PRIMARY, 0.95, &line);
+        let desc_x = (SCREEN_WIDTH - DESC_MAX_W) / 2;
+        frame.draw_text_wrapped_with_emoji(
+            font,
+            desc_x,
+            290,
+            DESC_MAX_W,
+            theme::TEXT_PRIMARY,
+            0.95,
+            &final_text,
+            None,
+        );
     }
 
     // Counts row: posts | followers | following.

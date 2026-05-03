@@ -30,6 +30,7 @@ use bsky_ime::Ime;
 use bsky_render::{Font, Frame};
 use bsky_worker::WorkResponse;
 
+use crate::tabbar::TopLevel;
 use crate::widget::UiCtx;
 
 pub trait Screen {
@@ -51,18 +52,40 @@ pub trait Screen {
     /// display. Default no-op; LoginScreen overrides for resume / login
     /// (pre-worker blocking work).
     fn after_present(&mut self) {}
+
+    /// `Some(level)` for top-level screens (Timeline, Profile-of-self,
+    /// Notifications, Search) — these render the tab bar and respond to
+    /// `SwitchTab` by being truncate-targets in the screen stack.
+    /// `None` for pushed sub-screens (Compose, Thread, Profile-of-other).
+    /// Default `None` so screens opt in.
+    fn top_level(&self) -> Option<TopLevel> {
+        None
+    }
 }
 
 /// Outcome of a `Screen::frame` call. Drives screen routing in main.rs.
 pub enum ScreenAction {
     /// Stay on the current screen.
     None,
-    /// Replace the current screen with this one. The old screen is
-    /// dropped.
-    Goto(Box<dyn Screen>),
+    /// Push a sub-screen onto the navigation stack. CIRCLE on the new
+    /// screen (if it handles CIRCLE) `Pop`s back here. Used for thread
+    /// view, compose, profile-of-other.
+    Push(Box<dyn Screen>),
+    /// Pop the current screen off the stack, returning to the screen
+    /// below. No-op if the current screen is the only one on the stack.
+    /// Top-level screens typically don't emit this (CIRCLE on a
+    /// top-level is a no-op).
+    Pop,
+    /// Tab-bar tap. main.rs walks the stack from the bottom; if a screen
+    /// with `top_level() == Some(target)` exists, the stack is truncated
+    /// to (and including) that screen. Otherwise main.rs constructs a
+    /// fresh instance of the target's top-level screen and pushes it as
+    /// the new root.
+    SwitchTab(TopLevel),
     /// LoginScreen → ProfileScreen transition. The `client` is handed to
-    /// main.rs so it can spawn the worker; the `next` screen already
-    /// holds its own clone of the same Arc.
+    /// main.rs so it can spawn the worker + retain a handle for
+    /// constructing top-level screens later via `SwitchTab`. The `next`
+    /// screen already holds its own clone of the same Arc.
     AuthComplete {
         client: Arc<AuthClient>,
         next: Box<dyn Screen>,

@@ -145,7 +145,7 @@ impl Screen for LoginScreen {
             let prev = core::mem::replace(&mut self.state, LoginState::_Transitioning);
             if let LoginState::Done(client) = prev {
                 let client = Arc::new(client);
-                let next = Box::new(ProfileScreen::new(Arc::clone(&client)));
+                let next = Box::new(ProfileScreen::new(Arc::clone(&client), None));
                 return ScreenAction::AuthComplete { client, next };
             }
             // Unreachable, but reset just in case.
