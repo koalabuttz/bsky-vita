@@ -25,10 +25,17 @@ ureq = { version = "2.10", default-features = false, features = ["tls"] }
 # which the upstream crate doesn't enable on its own. Re-add gzip in Phase 1
 # with either a flate2 backend swap or a [patch.crates-io] for simd-adler32.
 
-# atrium / xrpc deps will be wired in once the spike confirms TLS works:
-# atrium-api = { version = "0.25", default-features = false, features = ["bluesky", "namespace-appbsky", "namespace-comatproto"] }
-# atrium-xrpc = "0.12"
-# futures = { version = "0.3", default-features = false, features = ["executor"] }
+# atproto stack — pinned for reproducibility once Phase 1 is green.
+# `default-features = false` on atrium-api avoids pulling in the agent-with-tokio
+# default; we wire just the namespaces we use to keep binary size in check.
+# `default-features = false` on atrium-identity avoids the `doh-handle-resolver`
+# feature (hickory-proto), which we don't need — Vita can't do DNS-TXT cleanly,
+# and the XRPC fallback (com.atproto.identity.resolveHandle) covers all handles.
+atrium-api      = { version = "0.25", default-features = false, features = ["agent", "bluesky", "namespace-appbsky", "namespace-comatproto"] }
+atrium-xrpc     = "0.12"
+atrium-identity = { version = "0.1", default-features = false }
+futures         = { version = "0.3", default-features = false, features = ["executor"] }
+toml            = { version = "0.8", default-features = false, features = ["parse"] }
 
 [patch.crates-io]
 # ring 0.17.14 upstream build.rs doesn't emit ARM assembly for

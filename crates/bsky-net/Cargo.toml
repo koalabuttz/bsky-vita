@@ -4,3 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "XRPC client over ureq + rustls; atrium HttpClient implementation"
+
+[dependencies]
+atrium-xrpc = { workspace = true }
+ureq = { workspace = true }
