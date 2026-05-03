@@ -1,31 +1,34 @@
 //! bsky-vita: PS Vita homebrew Bluesky client.
 //!
-//! Phase 0.5: rustls spike. Performs a single HTTPS GET against the
-//! Bluesky AppView's `describeServer` endpoint to validate that the
-//! ureq + rustls + webpki-roots stack negotiates TLS 1.2/1.3 against
-//! Cloudflare-fronted Bluesky infrastructure from the Vita target.
+//! Phase 1: headless authenticated session against any PDS.
 //!
-//! Output goes to two places:
-//!   - println!()  — visible if PrincessLog / psp2shell is installed.
-//!   - ux0:data/BSKY00001/spike.log — pull via vitacompanion FTP on
-//!     port 1337 (e.g., `curl ftp://$VITA_IP:1337/ux0:data/BSKY00001/spike.log`).
+//! Reads `ux0:data/BSKY00001/credentials.toml`, resolves the handle to its
+//! current PDS (works for bsky.social *and* custom PDSes like yapfest.club),
+//! creates a session via app password, persists tokens to
+//! `ux0:data/BSKY00001/auth/session.json`, and fetches the user's own profile
+//! via `app.bsky.actor.getProfile`. The full report is written to
+//! `ux0:data/BSKY00001/spike.log` for retrieval over vitacompanion's FTP.
+//!
+//! Screen stays black; render skeleton + login UI are Phase 2.
 
 use std::fmt::Write as _;
+use std::sync::Arc;
 
-// describeServer is a PDS endpoint — bsky.social hosts the default PDS for
-// Bluesky users. (api.bsky.app is the AppView, which legitimately returns 501
-// for PDS-only NSIDs; that's how we know TLS is working.)
-const URL: &str = "https://bsky.social/xrpc/com.atproto.server.describeServer";
-const LOG_DIR: &str = "ux0:data/BSKY00001";
+use atrium_api::app::bsky::actor::get_profile;
+use bsky_auth::{
+    AuthError, FileSessionStore, PdsClient, ResolvedIdentity, CREDENTIALS_PATH, SESSION_PATH,
+    load_credentials, resolve_pds,
+};
+use bsky_models::AtpSession;
+use bsky_net::VitaHttpClient;
+use futures::executor::block_on;
+
 const LOG_PATH: &str = "ux0:data/BSKY00001/spike.log";
 
 fn main() {
-    let report = run_spike();
+    let report = run_phase1();
     println!("{report}");
 
-    // Best-effort log to disk. Never panic on IO errors so the LiveArea
-    // bubble stays alive long enough for an FTP pull regardless of state.
-    let _ = std::fs::create_dir_all(LOG_DIR);
     let _ = std::fs::write(LOG_PATH, &report);
 
     loop {
@@ -33,32 +36,112 @@ fn main() {
     }
 }
 
-fn run_spike() -> String {
+fn run_phase1() -> String {
     let mut out = String::new();
-    let _ = writeln!(out, "=== bsky-vita: rustls spike ===");
-    let _ = writeln!(out, "GET {URL}");
+    let _ = writeln!(out, "=== bsky-vita: phase 1 ===");
 
-    let result = ureq::get(URL)
-        .timeout(std::time::Duration::from_secs(30))
-        .call();
-
-    match result {
-        Ok(resp) => {
-            let _ = writeln!(out, "status: {}", resp.status());
-            match resp.into_string() {
-                Ok(body) => {
-                    let head = &body[..body.len().min(500)];
-                    let _ = writeln!(out, "body[..500]: {head}");
-                }
-                Err(e) => {
-                    let _ = writeln!(out, "body read err: {e}");
-                }
-            }
-        }
+    match block_on(run_inner(&mut out)) {
+        Ok(()) => {}
         Err(e) => {
-            let _ = writeln!(out, "request err: {e}");
+            let _ = writeln!(out, "ERROR: {e}");
         }
     }
-    let _ = writeln!(out, "=== spike done ===");
+
+    let _ = writeln!(out, "=== phase 1 done ===");
     out
+}
+
+/// Async body. We use exactly one `block_on` call site — at the boundary in
+/// `run_phase1` — to keep tokio out of the binary. Atrium's `tokio::sync`
+/// primitives are runtime-agnostic and tolerate `futures::executor::block_on`.
+async fn run_inner(out: &mut String) -> Result<(), AuthError> {
+    let creds = load_credentials(CREDENTIALS_PATH)?;
+    let _ = writeln!(out, "handle (from credentials.toml): {}", creds.handle);
+
+    // Single shared HTTP client — used by the resolver AND the agent's PDS
+    // client below. Arc-wrapped so atrium-identity can hold its own ref.
+    let http_client = Arc::new(VitaHttpClient::new());
+
+    // Step 1: resolve handle → DID → DID document → PDS URL.
+    let ResolvedIdentity { did, pds } =
+        resolve_pds(Arc::clone(&http_client), &creds.handle).await?;
+    let _ = writeln!(out, "resolved did: {did}");
+    let _ = writeln!(out, "resolved pds: {pds}");
+
+    // Step 2: build the agent (PDS-bound XRPC client + persistent session store).
+    let pds_client = PdsClient::new(http_client, &pds);
+    let store = FileSessionStore::new(SESSION_PATH);
+    let already_have_session = store.has_session();
+    let _ = writeln!(out, "session.json present: {already_have_session}");
+
+    let agent = atrium_api::agent::atp_agent::AtpAgent::new(pds_client, store);
+
+    // Step 3: log in (or resume an existing session if one is on disk).
+    let session = if already_have_session {
+        // The store already loaded the cached session at construction time.
+        // resume_session does a getSession round-trip (which auto-refreshes
+        // the access JWT if it's expired) and updates the store accordingly.
+        match agent.get_session().await {
+            Some(existing) => match agent.resume_session(existing.clone()).await {
+                Ok(()) => {
+                    let _ = writeln!(out, "resumed existing session");
+                    agent.get_session().await.unwrap_or(existing)
+                }
+                Err(e) => {
+                    let _ = writeln!(
+                        out,
+                        "resume failed ({e}), falling back to fresh login"
+                    );
+                    fresh_login(&agent, &creds.handle, &creds.app_password).await?
+                }
+            },
+            None => fresh_login(&agent, &creds.handle, &creds.app_password).await?,
+        }
+    } else {
+        fresh_login(&agent, &creds.handle, &creds.app_password).await?
+    };
+
+    let _ = writeln!(out, "did: {}", session.data.did.as_str());
+    let _ = writeln!(out, "handle: {}", session.data.handle.as_str());
+    let _ = writeln!(out, "access_jwt len: {}", session.data.access_jwt.len());
+    let _ = writeln!(out, "refresh_jwt len: {}", session.data.refresh_jwt.len());
+
+    // Step 4: getProfile against the user's own DID, via the (now authenticated)
+    // agent's PDS — which proxies to the AppView for app.bsky.* reads.
+    let profile = agent
+        .api
+        .app
+        .bsky
+        .actor
+        .get_profile(
+            get_profile::ParametersData {
+                actor: session.data.did.clone().into(),
+            }
+            .into(),
+        )
+        .await
+        .map_err(|e| AuthError::Other(format!("getProfile failed: {e}")))?;
+
+    match serde_json::to_string_pretty(&*profile) {
+        Ok(json) => {
+            let head = &json[..json.len().min(800)];
+            let _ = writeln!(out, "getProfile (first 800 bytes):\n{head}");
+        }
+        Err(e) => {
+            let _ = writeln!(out, "getProfile JSON serialize failed: {e}");
+        }
+    }
+
+    Ok(())
+}
+
+async fn fresh_login(
+    agent: &atrium_api::agent::atp_agent::AtpAgent<FileSessionStore, PdsClient>,
+    handle: &str,
+    password: &str,
+) -> Result<AtpSession, AuthError> {
+    agent
+        .login(handle, password)
+        .await
+        .map_err(|e| AuthError::Login(format!("{e}")))
 }

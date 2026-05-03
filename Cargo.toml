@@ -31,7 +31,9 @@ ureq = { version = "2.10", default-features = false, features = ["tls"] }
 # `default-features = false` on atrium-identity avoids the `doh-handle-resolver`
 # feature (hickory-proto), which we don't need — Vita can't do DNS-TXT cleanly,
 # and the XRPC fallback (com.atproto.identity.resolveHandle) covers all handles.
-atrium-api      = { version = "0.25", default-features = false, features = ["agent", "bluesky", "namespace-appbsky", "namespace-comatproto"] }
+atrium-api      = { version = "0.25", default-features = false, features = ["agent", "bluesky", "namespace-appbsky"] }
+# The `bluesky` feature pulls the canonical Bluesky lexicon set; com.atproto.*
+# types are in the base (no namespace-comatproto feature exists).
 atrium-xrpc     = "0.12"
 atrium-identity = { version = "0.1", default-features = false }
 futures         = { version = "0.3", default-features = false, features = ["executor"] }

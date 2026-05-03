@@ -19,13 +19,17 @@ assets = "static"
 vitasdk-sys = { workspace = true }
 vita-newlib-shims = { workspace = true }
 
-# Spike: TLS + HTTP. Will move to crates/bsky-net once the spike is green.
-ureq = { workspace = true }
+# Phase 1 stack
+bsky-net    = { path = "../crates/bsky-net" }
+bsky-auth   = { path = "../crates/bsky-auth" }
+bsky-models = { path = "../crates/bsky-models" }
+atrium-api  = { workspace = true }
+serde_json  = { workspace = true }
+futures     = { workspace = true }
 
-# Library crates are wired in as Phase 1 work fills them in:
+# Render / input / IME / UI come in Phase 2:
 # bsky-render = { path = "../crates/bsky-render" }
 # bsky-ui     = { path = "../crates/bsky-ui" }
-# bsky-net    = { path = "../crates/bsky-net" }
 
 [[bin]]
 name = "bsky-vita"

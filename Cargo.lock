@@ -176,6 +176,9 @@ dependencies = [
 [[package]]
 name = "bsky-models"
 version = "0.1.0"
+dependencies = [
+ "atrium-api",
+]
 
 [[package]]
 name = "bsky-net"
@@ -204,7 +207,12 @@ version = "0.1.0"
 name = "bsky-vita-app"
 version = "0.1.0"
 dependencies = [
- "ureq",
+ "atrium-api",
+ "bsky-auth",
+ "bsky-models",
+ "bsky-net",
+ "futures",
+ "serde_json",
  "vita-newlib-shims",
  "vitasdk-sys",
 ]

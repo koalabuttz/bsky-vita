@@ -7,6 +7,9 @@
 *.velf
 *.self
 
+# Local dev credentials — never committed; pushed via `make push-creds`.
+credentials.toml
+
 # Editor / OS
 .vscode/
 .idea/
