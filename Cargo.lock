@@ -208,6 +208,7 @@ dependencies = [
  "bsky-ime",
  "bsky-input",
  "bsky-render",
+ "bsky-worker",
  "futures",
 ]
 
@@ -223,10 +224,21 @@ dependencies = [
  "bsky-net",
  "bsky-render",
  "bsky-ui",
+ "bsky-worker",
  "futures",
  "serde_json",
  "vita-newlib-shims",
  "vitasdk-sys",
+]
+
+[[package]]
+name = "bsky-worker"
+version = "0.1.0"
+dependencies = [
+ "atrium-api",
+ "bsky-auth",
+ "crossbeam-channel",
+ "futures",
 ]
 
 [[package]]

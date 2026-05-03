@@ -1,22 +1,25 @@
 //! bsky-vita: PS Vita homebrew Bluesky client.
 //!
-//! Phase 2.5: screen-routing main loop.
+//! Phase 3.1: worker-thread pattern for non-blocking PDS calls.
 //!
 //! - `LoginScreen` (initial) checks for `session.json` on its first
 //!   frame; resumes if possible, otherwise shows the login form. Tap
-//!   Login → "Authenticating…" → transitions to `ProfileScreen` on
-//!   success.
-//! - `ProfileScreen` calls `getProfile` on the user's own DID; renders
-//!   display name, handle, follower/following counts, did, pds.
+//!   Login → "Authenticating…" → emits `ScreenAction::AuthComplete`,
+//!   carrying the `Arc<AuthClient>` we use to spawn the worker thread.
+//! - `ProfileScreen` (post-auth) dispatches `WorkRequest::GetOwnProfile`
+//!   to the worker on its first frame; renders display name + handle +
+//!   counts when the response arrives.
 //!
-//! Network calls block in `Screen::after_present` so the just-rendered
-//! "Loading…" / "Authenticating…" frame is on screen before we freeze.
-//! Phase 3+ will refactor to a worker thread once timeline polling makes
-//! per-call freezes intolerable.
+//! Network calls now happen on a background thread; the render loop
+//! drains responses via `worker.try_recv()` each frame and never blocks.
+//! `Screen::after_present` survives for the pre-worker LoginScreen path
+//! (`try_resume_existing_session`, `login_with_password`) — those run
+//! *before* the worker exists.
 
 use bsky_input::{Pad, Touch};
 use bsky_render::Render;
 use bsky_ui::{LoginScreen, Screen, ScreenAction, UiCtx};
+use bsky_worker::Worker;
 
 fn main() {
     let mut render = match Render::init() {
@@ -41,12 +44,18 @@ fn main() {
     // handles resume-from-session.json on the first frame.
     let mut screen: Box<dyn Screen> = Box::new(LoginScreen::new());
 
+    // Worker is spawned the first time a screen returns `AuthComplete`
+    // (LoginScreen → ProfileScreen). Pre-auth screens get `worker: None`
+    // in their `UiCtx`.
+    let mut worker: Option<Worker> = None;
+
     loop {
         let pf = pad.poll();
         let tf = touch.poll();
         let ctx = UiCtx {
             touches: &tf.points,
             pad: &pf,
+            worker: worker.as_ref(),
         };
 
         // Render + collect transition action. The Frame's Drop happens
@@ -60,11 +69,31 @@ fn main() {
             action
         };
 
-        // Frame is now on the display; safe to do blocking work.
+        // Frame is now on the display; safe to do blocking work for
+        // pre-worker screens (LoginScreen).
         screen.after_present();
 
-        if let ScreenAction::Goto(next) = action {
-            screen = next;
+        // Drain any worker responses produced since the last frame and
+        // hand them to the active screen. Typically 0–1 per frame, but
+        // we loop in case multiple complete simultaneously.
+        if let Some(w) = worker.as_ref() {
+            while let Some(resp) = w.try_recv() {
+                screen.handle_worker_response(resp);
+            }
+        }
+
+        match action {
+            ScreenAction::None => {}
+            ScreenAction::Goto(next) => {
+                screen = next;
+            }
+            ScreenAction::AuthComplete { client, next } => {
+                // First (and currently only) auth transition: spawn the
+                // worker now that we have an AuthClient. Subsequent
+                // re-auths would replace the worker; not needed in 3.1.
+                worker = Some(Worker::spawn(client));
+                screen = next;
+            }
         }
     }
 }

@@ -1,24 +1,29 @@
 //! Profile screen — shows the logged-in user's own profile.
 //!
-//! Two-frame load pattern:
-//! 1. Frame N: `frame()` renders "Loading profile…" while state is `Pending`.
-//! 2. After present: `after_present()` blocks on `getProfile`.
-//! 3. Frame N+1: `frame()` renders display name + handle + counts.
+//! Phase 3.1 worker pattern:
+//! 1. First frame after construction: dispatch `WorkRequest::GetOwnProfile`
+//!    to the worker, mark `dispatched = true`, render "Loading profile…".
+//! 2. Subsequent frames: still render "Loading…" while `state == Pending`.
+//! 3. Worker eventually publishes a `WorkResponse::Profile` — main.rs
+//!    drains it via `try_recv` and calls `handle_worker_response`, which
+//!    flips `state` to `Loaded` or `Error`.
+//! 4. Next frame: render display name + handle + counts.
 //!
-//! No logout / no refresh actions in 2.5 — Phase 3 polish.
+//! No logout / no refresh actions in 3.1 — Phase 3+ polish.
+
+use std::sync::Arc;
 
 use atrium_api::app::bsky::actor::defs::ProfileViewDetailedData;
-use atrium_api::app::bsky::actor::get_profile;
 use bsky_auth::AuthClient;
 use bsky_ime::Ime;
 use bsky_render::{theme, Font, Frame, SCREEN_HEIGHT, SCREEN_WIDTH};
-use futures::executor::block_on;
+use bsky_worker::{WorkRequest, WorkResponse};
 
 use crate::screen::{Screen, ScreenAction};
 use crate::widget::UiCtx;
 
 enum ProfileState {
-    /// First frame — render loading; `after_present` will fire the call.
+    /// Initial state — waiting on the worker to return getProfile.
     Pending,
     /// `getProfile` returned successfully.
     Loaded(Box<ProfileViewDetailedData>),
@@ -27,15 +32,20 @@ enum ProfileState {
 }
 
 pub struct ProfileScreen {
-    client: AuthClient,
+    client: Arc<AuthClient>,
     state: ProfileState,
+    /// Tracks whether we've already sent the `GetOwnProfile` request this
+    /// session. Without this we'd re-dispatch every frame while the
+    /// response is in flight.
+    dispatched: bool,
 }
 
 impl ProfileScreen {
-    pub fn new(client: AuthClient) -> Self {
+    pub fn new(client: Arc<AuthClient>) -> Self {
         Self {
             client,
             state: ProfileState::Pending,
+            dispatched: false,
         }
     }
 }
@@ -45,9 +55,21 @@ impl Screen for ProfileScreen {
         &mut self,
         frame: &mut Frame,
         font: &Font,
-        _ctx: &UiCtx,
+        ctx: &UiCtx,
         _ime: &mut Ime,
     ) -> ScreenAction {
+        // Dispatch the fetch on the first frame. The worker is guaranteed
+        // to exist by the AuthComplete invariant (main.rs spawns it before
+        // pushing this screen). If it's somehow missing, fall through to
+        // a static "Loading…" — the user sees a stuck screen instead of
+        // a panic.
+        if !self.dispatched {
+            if let Some(worker) = ctx.worker {
+                worker.send(WorkRequest::GetOwnProfile);
+                self.dispatched = true;
+            }
+        }
+
         // Title bar (consistent with LoginScreen).
         frame.draw_text_centered(font, 40, theme::TEXT_PRIMARY, 1.6, "bsky-vita");
 
@@ -86,27 +108,10 @@ impl Screen for ProfileScreen {
         ScreenAction::None
     }
 
-    fn after_present(&mut self) {
-        if matches!(self.state, ProfileState::Pending) {
-            // Use the user's own DID for the actor param.
-            let did = match block_on(self.client.agent.did()) {
-                Some(d) => d,
-                None => {
-                    self.state =
-                        ProfileState::Error("agent has no session DID — unexpected".into());
-                    return;
-                }
-            };
-            let result = block_on(self.client.agent.api.app.bsky.actor.get_profile(
-                get_profile::ParametersData {
-                    actor: did.into(),
-                }
-                .into(),
-            ));
-            match result {
-                Ok(p) => self.state = ProfileState::Loaded(Box::new(p.data)),
-                Err(e) => self.state = ProfileState::Error(format!("{e}")),
-            }
+    fn handle_worker_response(&mut self, resp: WorkResponse) {
+        match resp {
+            WorkResponse::Profile(Ok(p)) => self.state = ProfileState::Loaded(p),
+            WorkResponse::Profile(Err(e)) => self.state = ProfileState::Error(e),
         }
     }
 }
@@ -146,7 +151,7 @@ fn draw_profile(frame: &mut Frame, font: &Font, p: &ProfileViewDetailedData) {
     frame.draw_text_centered(font, 290, theme::TEXT_MUTED, 1.0, &line);
 }
 
-fn draw_session_footer(frame: &mut Frame, font: &Font, client: &bsky_auth::AuthClient) {
+fn draw_session_footer(frame: &mut Frame, font: &Font, client: &AuthClient) {
     let did_line = format!("did: {}", client.resolved.did);
     let pds_line = format!("pds: {}", client.resolved.pds);
     let _ = SCREEN_WIDTH;

@@ -16,6 +16,7 @@
 
 use bsky_input::{PadFrame, TouchPoint};
 use bsky_render::{theme, Color, Font, Frame};
+use bsky_worker::Worker;
 
 /// Simple axis-aligned rectangle in display-pixel coordinates.
 #[derive(Copy, Clone, Debug)]
@@ -39,9 +40,14 @@ impl Rect {
 }
 
 /// Per-frame input context handed to every widget.
+///
+/// `worker` is `None` while still in pre-auth screens (LoginScreen) and
+/// `Some` for everything that runs after `ScreenAction::AuthComplete`.
+/// Post-auth screens can `unwrap` it; pre-auth screens shouldn't touch it.
 pub struct UiCtx<'a> {
     pub touches: &'a [TouchPoint],
     pub pad: &'a PadFrame,
+    pub worker: Option<&'a Worker>,
 }
 
 #[derive(Default)]

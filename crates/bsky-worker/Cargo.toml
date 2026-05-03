@@ -1,0 +1,12 @@
+[package]
+name = "bsky-worker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Worker thread + crossbeam channels for non-blocking PDS calls"
+
+[dependencies]
+bsky-auth         = { path = "../bsky-auth" }
+atrium-api        = { workspace = true }
+crossbeam-channel = "0.5"
+futures           = { workspace = true }

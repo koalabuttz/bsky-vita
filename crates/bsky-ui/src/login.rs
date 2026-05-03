@@ -22,6 +22,8 @@
 //! happens in `after_present` so the user sees the "Checking…" /
 //! "Authenticating…" frame *before* we freeze the loop.
 
+use std::sync::Arc;
+
 use bsky_auth::{login_with_password, try_resume_existing_session, AuthClient};
 use bsky_ime::{Ime, ImeMode, ImeState, TextBoxMode};
 use bsky_render::{theme, Color, Font, Frame, SCREEN_HEIGHT, SCREEN_WIDTH};
@@ -138,10 +140,13 @@ impl Screen for LoginScreen {
             // form back briefly while transitioning. Same visual as the
             // Authenticating state.
             self.draw_overlay_message(frame, font, "Authenticating…");
-            // Take the client out and Goto the Profile screen.
+            // Take the client out, wrap in Arc, and emit AuthComplete so
+            // main.rs can spawn the worker.
             let prev = core::mem::replace(&mut self.state, LoginState::_Transitioning);
             if let LoginState::Done(client) = prev {
-                return ScreenAction::Goto(Box::new(ProfileScreen::new(client)));
+                let client = Arc::new(client);
+                let next = Box::new(ProfileScreen::new(Arc::clone(&client)));
+                return ScreenAction::AuthComplete { client, next };
             }
             // Unreachable, but reset just in case.
             self.state = LoginState::Idle;

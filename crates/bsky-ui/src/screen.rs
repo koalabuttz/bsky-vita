@@ -1,28 +1,34 @@
 //! [`Screen`] trait — what a top-level UI view implements.
 //!
-//! Two methods, called once per main-loop iteration:
+//! Three methods, each called once per main-loop iteration in this order:
 //!
 //! - [`Screen::frame`] — drawing + input. Returns a [`ScreenAction`]
-//!   (consumed by main.rs after the frame is presented).
+//!   (consumed by main.rs after the frame is presented). Screens that need
+//!   network data dispatch a [`WorkRequest`] via the worker handle in
+//!   `UiCtx` and remain in a "Pending" visual state until a response
+//!   arrives.
+//! - [`Screen::handle_worker_response`] — called for each [`WorkResponse`]
+//!   the worker has produced since the last frame. Default no-op; screens
+//!   that dispatched work override this to update their state.
 //! - [`Screen::after_present`] — called *after* the rendered frame has
-//!   been swapped to the display. Override this to do blocking network
-//!   work; the user sees the just-rendered frame (typically a "Loading…"
-//!   or "Authenticating…" overlay) while the call is in flight.
+//!   been swapped to the display. Legacy hook for blocking work that
+//!   happens before the worker exists (e.g. LoginScreen's resume / login).
 //!
-//! Together these let a screen respond synchronously to "I need to fetch
-//! data" without freezing mid-paint:
+//! ### Why two paths (worker vs after_present)?
 //!
-//! 1. Frame N: `frame()` renders "Loading…" and remains in `Pending` state.
-//! 2. Frame N's Drop swaps the buffer — user sees the loading state.
-//! 3. `after_present()` runs the blocking call, transitions state to
-//!    `Loaded(data)`.
-//! 4. Frame N+1: `frame()` renders the data.
-//!
-//! Phase 3+ may swap this for a worker-thread approach when the freeze
-//! becomes unacceptable (timeline polling). For Phase 2.5 it's fine.
+//! `after_present` is the Phase 2.5 pattern: render "Loading…", swap, then
+//! block. It works for one-shot calls but freezes the render loop. Phase
+//! 3.1 introduces the worker pattern for the post-auth steady state where
+//! freezes would be visible. LoginScreen still uses `after_present`
+//! because it runs *before* the worker exists (the worker is spawned at
+//! `ScreenAction::AuthComplete`, with the freshly-acquired AuthClient).
 
+use std::sync::Arc;
+
+use bsky_auth::AuthClient;
 use bsky_ime::Ime;
 use bsky_render::{Font, Frame};
+use bsky_worker::WorkResponse;
 
 use crate::widget::UiCtx;
 
@@ -37,8 +43,13 @@ pub trait Screen {
         ime: &mut Ime,
     ) -> ScreenAction;
 
+    /// Update screen state from a worker response. Default no-op for
+    /// screens that don't dispatch work (e.g. LoginScreen).
+    fn handle_worker_response(&mut self, _resp: WorkResponse) {}
+
     /// Called once after the just-drawn frame has been swapped to the
-    /// display. Default no-op; screens override to do blocking work.
+    /// display. Default no-op; LoginScreen overrides for resume / login
+    /// (pre-worker blocking work).
     fn after_present(&mut self) {}
 }
 
@@ -49,4 +60,11 @@ pub enum ScreenAction {
     /// Replace the current screen with this one. The old screen is
     /// dropped.
     Goto(Box<dyn Screen>),
+    /// LoginScreen → ProfileScreen transition. The `client` is handed to
+    /// main.rs so it can spawn the worker; the `next` screen already
+    /// holds its own clone of the same Arc.
+    AuthComplete {
+        client: Arc<AuthClient>,
+        next: Box<dyn Screen>,
+    },
 }

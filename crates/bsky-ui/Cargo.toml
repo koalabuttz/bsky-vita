@@ -10,5 +10,6 @@ bsky-render = { path = "../bsky-render" }
 bsky-input  = { path = "../bsky-input" }
 bsky-ime    = { path = "../bsky-ime" }
 bsky-auth   = { path = "../bsky-auth" }
+bsky-worker = { path = "../bsky-worker" }
 atrium-api  = { workspace = true }
 futures     = { workspace = true }
