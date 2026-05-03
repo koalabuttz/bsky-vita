@@ -34,6 +34,15 @@
 mod ffi;
 
 use core::marker::PhantomData;
+#[cfg(target_os = "vita")]
+use core::ptr::NonNull;
+#[cfg(target_os = "vita")]
+use std::ffi::CString;
+
+/// Display dimensions. The Vita's framebuffer is fixed at 960×544 regardless
+/// of model (OG OLED, slim LCD, or PSTV — PSTV upscales to TV via system).
+pub const SCREEN_WIDTH: i32 = 960;
+pub const SCREEN_HEIGHT: i32 = 544;
 
 /// 32-bit RGBA color matching vita2d's `RGBA8` macro layout: alpha in the
 /// MSB, then blue, then green, then red in the LSB. Construct via
@@ -78,6 +87,8 @@ pub mod theme {
 pub enum RenderError {
     /// `vita2d_init` returned a negative status code.
     Init(i32),
+    /// `vita2d_load_*_pgf` returned a null pointer.
+    PgfLoad,
     /// Method was called on a non-Vita target where rendering is unavailable.
     NotOnVita,
 }
@@ -86,6 +97,7 @@ impl core::fmt::Display for RenderError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             RenderError::Init(code) => write!(f, "vita2d_init failed: {code}"),
+            RenderError::PgfLoad => write!(f, "vita2d_load_default_pgf returned null"),
             RenderError::NotOnVita => write!(f, "render is only supported on the Vita target"),
         }
     }
@@ -155,6 +167,47 @@ impl Render {
         }
         Frame { _render: PhantomData }
     }
+
+    /// Load Sony's default system PGF font (Japanese; also covers Latin
+    /// glyphs used by Bluesky handles + display names well enough for
+    /// Phase 2). Call once at startup; the resulting [`Font`] is reused
+    /// across all frames.
+    ///
+    /// PGF symbols are weak imports in libvita2d.h; `libvita2d_ext.a`
+    /// resolves them at link time and the actual implementation comes
+    /// from `libScePgf_stub.a` (already linked via `vitasdk-sys` +
+    /// `bsky-render`'s build.rs).
+    pub fn load_default_pgf(&self) -> Result<Font, RenderError> {
+        #[cfg(target_os = "vita")]
+        {
+            let p = unsafe { ffi::vita2d_load_default_pgf() };
+            match NonNull::new(p) {
+                Some(ptr) => Ok(Font { ptr }),
+                None => Err(RenderError::PgfLoad),
+            }
+        }
+        #[cfg(not(target_os = "vita"))]
+        {
+            Err(RenderError::NotOnVita)
+        }
+    }
+}
+
+/// A loaded font handle. Single-threaded; freed via `vita2d_free_pgf` on Drop.
+pub struct Font {
+    #[cfg(target_os = "vita")]
+    ptr: NonNull<ffi::vita2d_pgf>,
+    #[cfg(not(target_os = "vita"))]
+    _private: PhantomData<*const ()>,
+}
+
+impl Drop for Font {
+    fn drop(&mut self) {
+        #[cfg(target_os = "vita")]
+        unsafe {
+            ffi::vita2d_free_pgf(self.ptr.as_ptr());
+        }
+    }
 }
 
 impl Drop for Render {
@@ -174,12 +227,120 @@ pub struct Frame<'r> {
 }
 
 impl<'r> Frame<'r> {
+    /// Filled rectangle. Coordinates are display pixels (0..960 × 0..544).
+    pub fn fill_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Color) {
+        #[cfg(target_os = "vita")]
+        unsafe {
+            ffi::vita2d_draw_rectangle(x, y, w, h, color.raw());
+        }
+        #[cfg(not(target_os = "vita"))]
+        {
+            let _ = (x, y, w, h, color);
+        }
+    }
+
+    /// Single-pixel-wide line.
+    pub fn draw_line(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, color: Color) {
+        #[cfg(target_os = "vita")]
+        unsafe {
+            ffi::vita2d_draw_line(x0, y0, x1, y1, color.raw());
+        }
+        #[cfg(not(target_os = "vita"))]
+        {
+            let _ = (x0, y0, x1, y1, color);
+        }
+    }
+
+    /// Draw `text` at integer pixel position `(x, y)` (the y is the text
+    /// baseline). Returns the x-position immediately after the last glyph,
+    /// suitable for chaining sequential `draw_text` calls.
+    ///
+    /// Any embedded NUL bytes are stripped before passing to vita2d. UTF-8
+    /// strings render as PGF glyphs; characters outside the loaded language
+    /// pack render as the system tofu glyph.
+    pub fn draw_text(
+        &mut self,
+        font: &Font,
+        x: i32,
+        y: i32,
+        color: Color,
+        scale: f32,
+        text: &str,
+    ) -> i32 {
+        #[cfg(target_os = "vita")]
+        {
+            let cstr = match CString::new(text.replace('\0', "")) {
+                Ok(s) => s,
+                Err(_) => return x,
+            };
+            unsafe {
+                ffi::vita2d_pgf_draw_text(
+                    font.ptr.as_ptr(),
+                    x,
+                    y,
+                    color.raw(),
+                    scale,
+                    cstr.as_ptr(),
+                )
+            }
+        }
+        #[cfg(not(target_os = "vita"))]
+        {
+            let _ = (font, y, color, scale, text);
+            x
+        }
+    }
+
+    /// Measure `text` as it would render with the given font + scale.
+    /// Returns `(width, height)` in display pixels.
+    pub fn measure_text(&self, font: &Font, scale: f32, text: &str) -> (i32, i32) {
+        #[cfg(target_os = "vita")]
+        {
+            let cstr = match CString::new(text.replace('\0', "")) {
+                Ok(s) => s,
+                Err(_) => return (0, 0),
+            };
+            let mut w: i32 = 0;
+            let mut h: i32 = 0;
+            unsafe {
+                ffi::vita2d_pgf_text_dimensions(
+                    font.ptr.as_ptr(),
+                    scale,
+                    cstr.as_ptr(),
+                    &mut w,
+                    &mut h,
+                );
+            }
+            (w, h)
+        }
+        #[cfg(not(target_os = "vita"))]
+        {
+            let _ = (font, scale, text);
+            (0, 0)
+        }
+    }
+
+    /// Convenience: draw `text` centered horizontally on the screen at
+    /// the given y baseline. Returns the bounding box (x, y, w, h) so
+    /// callers can stack labels.
+    pub fn draw_text_centered(
+        &mut self,
+        font: &Font,
+        y: i32,
+        color: Color,
+        scale: f32,
+        text: &str,
+    ) -> (i32, i32, i32, i32) {
+        let (w, h) = self.measure_text(font, scale, text);
+        let x = (SCREEN_WIDTH - w) / 2;
+        self.draw_text(font, x, y, color, scale, text);
+        (x, y, w, h)
+    }
+
     /// Drive a modal common dialog (e.g. sceImeDialog) for one frame. Must
     /// be called *between* draw calls and the implicit swap-on-drop —
-    /// that's automatic since `pump_ime` takes `&mut self`.
-    ///
-    /// Phase 2.3 turns this into a real path; for Phase 2.1 it exists as
-    /// a no-op so the API surface is stable.
+    /// that's automatic since `pump_ime` takes `&mut self`. Phase 2.3
+    /// wires this into a real IME flow.
     pub fn pump_ime(&mut self) {
         #[cfg(target_os = "vita")]
         unsafe {

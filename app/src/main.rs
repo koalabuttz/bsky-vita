@@ -33,17 +33,38 @@ fn main() {
     println!("{report}");
     let _ = std::fs::write(LOG_PATH, &report);
 
-    // Phase 2.1: open vita2d, swap forever. No input yet (Phase 2.3).
-    // Using ACCENT (bright Bsky-blue) for the clear so a working render
-    // loop is unambiguous on screen — `theme::BACKGROUND` is dark slate
-    // and indistinguishable from a powered-off panel. Phase 2.2 will
-    // switch this back to BACKGROUND once we render text on top.
+    // Phase 2.2: open vita2d, draw a centered title in PGF text on a
+    // dark-slate background. Still no input handling (Phase 2.3); user
+    // exits via the PS button.
     match bsky_render::Render::init() {
         Ok(mut render) => {
-            render.set_clear_color(bsky_render::theme::ACCENT);
+            render.set_clear_color(bsky_render::theme::BACKGROUND);
+            let font = render
+                .load_default_pgf()
+                .expect("load default PGF font");
+
+            const TITLE: &str = "bsky-vita";
+            const SUBTITLE: &str = "phase 2 — render skeleton";
+
             loop {
-                let _frame = render.begin_frame();
-                // Drop swaps buffers + waits for vblank (60 fps cap).
+                let mut frame = render.begin_frame();
+                // Title: large, white, centered, slightly above middle.
+                let (_x, _y, _w, h) = frame.draw_text_centered(
+                    &font,
+                    bsky_render::SCREEN_HEIGHT / 2 - 8,
+                    bsky_render::theme::TEXT_PRIMARY,
+                    1.5,
+                    TITLE,
+                );
+                // Subtitle: smaller, muted, just below.
+                frame.draw_text_centered(
+                    &font,
+                    bsky_render::SCREEN_HEIGHT / 2 + h + 8,
+                    bsky_render::theme::TEXT_MUTED,
+                    1.0,
+                    SUBTITLE,
+                );
+                // Drop swaps + vblank-waits (60 fps).
             }
         }
         Err(e) => {

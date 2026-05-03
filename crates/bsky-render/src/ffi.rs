@@ -13,7 +13,7 @@
 
 #![allow(non_camel_case_types, non_snake_case, dead_code)]
 
-use core::ffi::{c_int, c_uint};
+use core::ffi::{c_char, c_float, c_int, c_uint};
 
 // `vita2d.h` declares `vita2d_pgf`, `vita2d_pvf`, `vita2d_font`, and
 // `vita2d_texture` as forward-declared structs we never inspect directly.
@@ -45,4 +45,46 @@ unsafe extern "C" {
     // the current vita2d framebuffer info. Must be called between
     // start_drawing and end_drawing each frame while a modal dialog is up.
     pub fn vita2d_common_dialog_update() -> c_int;
+
+    // Primitive drawing
+    pub fn vita2d_draw_pixel(x: c_float, y: c_float, color: c_uint);
+    pub fn vita2d_draw_line(x0: c_float, y0: c_float, x1: c_float, y1: c_float, color: c_uint);
+    pub fn vita2d_draw_rectangle(
+        x: c_float,
+        y: c_float,
+        w: c_float,
+        h: c_float,
+        color: c_uint,
+    );
+
+    // PGF system font (Sony's bitmap font; covers Latin + Japanese + Chinese
+    // + Korean depending on which language packs are loaded).
+    pub fn vita2d_load_default_pgf() -> *mut vita2d_pgf;
+    pub fn vita2d_load_custom_pgf(path: *const c_char) -> *mut vita2d_pgf;
+    pub fn vita2d_free_pgf(font: *mut vita2d_pgf);
+    pub fn vita2d_pgf_draw_text(
+        font: *mut vita2d_pgf,
+        x: c_int,
+        y: c_int,
+        color: c_uint,
+        scale: c_float,
+        text: *const c_char,
+    ) -> c_int;
+    pub fn vita2d_pgf_text_width(
+        font: *mut vita2d_pgf,
+        scale: c_float,
+        text: *const c_char,
+    ) -> c_int;
+    pub fn vita2d_pgf_text_height(
+        font: *mut vita2d_pgf,
+        scale: c_float,
+        text: *const c_char,
+    ) -> c_int;
+    pub fn vita2d_pgf_text_dimensions(
+        font: *mut vita2d_pgf,
+        scale: c_float,
+        text: *const c_char,
+        width: *mut c_int,
+        height: *mut c_int,
+    );
 }
