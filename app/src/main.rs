@@ -12,7 +12,10 @@
 
 use std::fmt::Write as _;
 
-const URL: &str = "https://api.bsky.app/xrpc/com.atproto.server.describeServer";
+// describeServer is a PDS endpoint — bsky.social hosts the default PDS for
+// Bluesky users. (api.bsky.app is the AppView, which legitimately returns 501
+// for PDS-only NSIDs; that's how we know TLS is working.)
+const URL: &str = "https://bsky.social/xrpc/com.atproto.server.describeServer";
 const LOG_DIR: &str = "ux0:data/BSKY00001";
 const LOG_PATH: &str = "ux0:data/BSKY00001/spike.log";
 

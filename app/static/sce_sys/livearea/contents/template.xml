@@ -1,16 +1,12 @@
-<?xml version="1.0" encoding="utf-8" standalone="yes"?>
-<livearea style="a1" format-ver="01.00" content-rev="1">
+<?xml version="1.0" encoding="utf-8"?>
+
+<livearea style="psmobile" format-ver="01.00" content-rev="1">
 	<livearea-background>
-		<contents>
-			<image>bg0.png</image>
-		</contents>
+		<image>bg0.png</image>
 	</livearea-background>
 
 	<gate>
-		<startup-image>
-			<contents>
-				<image>startup.png</image>
-			</contents>
-		</startup-image>
+		<startup-image>startup.png</startup-image>
 	</gate>
+
 </livearea>
