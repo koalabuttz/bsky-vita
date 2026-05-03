@@ -165,7 +165,10 @@ impl Render {
             ffi::vita2d_start_drawing();
             ffi::vita2d_clear_screen();
         }
-        Frame { _render: PhantomData }
+        Frame {
+            ended: false,
+            _render: PhantomData,
+        }
     }
 
     /// Load Sony's default system PGF font (Japanese; also covers Latin
@@ -221,8 +224,28 @@ impl Drop for Render {
 }
 
 /// A single drawing frame. Holds an exclusive borrow on `Render` so two
-/// frames can't overlap. Drop calls `vita2d_end_drawing` + `vita2d_swap_buffers`.
+/// frames can't overlap.
+///
+/// Drop semantics ensure the correct vita2d frame ordering even when an
+/// optional [`pump_ime`](Frame::pump_ime) call is in the mix:
+///
+/// ```text
+///   begin_frame  →  start_drawing + clear_screen
+///   …draws…
+///   pump_ime?    →  end_drawing  +  vita2d_common_dialog_update
+///   Drop         →  end_drawing (if pump_ime wasn't called)
+///                +  swap_buffers
+/// ```
+///
+/// `vita2d_common_dialog_update` MUST land after `vita2d_end_drawing` and
+/// before `vita2d_swap_buffers` for modal dialogs (sceImeDialog,
+/// sceMsgDialog, etc.) to actually paint onto the back buffer. Calling it
+/// in the wrong slot leaves the dialog active-but-invisible, with input
+/// captured by an unseen keyboard.
 pub struct Frame<'r> {
+    /// Have we already called `vita2d_end_drawing` (via `pump_ime`)?
+    /// Drop checks this to avoid a double-end.
+    ended: bool,
     _render: PhantomData<&'r mut Render>,
 }
 
@@ -337,13 +360,25 @@ impl<'r> Frame<'r> {
         (x, y, w, h)
     }
 
-    /// Drive a modal common dialog (e.g. sceImeDialog) for one frame. Must
-    /// be called *between* draw calls and the implicit swap-on-drop —
-    /// that's automatic since `pump_ime` takes `&mut self`. Phase 2.3
-    /// wires this into a real IME flow.
+    /// Drive a modal common dialog (e.g. sceImeDialog) for one frame.
+    ///
+    /// This ends the GXM scene first (so any draws above are committed),
+    /// then calls `vita2d_common_dialog_update` to overlay the dialog
+    /// onto the back buffer. The buffer swap still happens on Drop, so
+    /// the resulting per-frame sequence is `end_drawing → dialog_update →
+    /// swap_buffers` — which is what the system expects for modal dialogs
+    /// to actually render.
+    ///
+    /// Calling `pump_ime` more than once per frame is fine but redundant;
+    /// only the first call ends the scene, subsequent calls just paint
+    /// the (already-ended) frame again.
     pub fn pump_ime(&mut self) {
         #[cfg(target_os = "vita")]
         unsafe {
+            if !self.ended {
+                ffi::vita2d_end_drawing();
+                self.ended = true;
+            }
             ffi::vita2d_common_dialog_update();
         }
     }
@@ -353,7 +388,9 @@ impl<'r> Drop for Frame<'r> {
     fn drop(&mut self) {
         #[cfg(target_os = "vita")]
         unsafe {
-            ffi::vita2d_end_drawing();
+            if !self.ended {
+                ffi::vita2d_end_drawing();
+            }
             ffi::vita2d_swap_buffers();
         }
     }

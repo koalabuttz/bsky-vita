@@ -33,9 +33,14 @@ fn main() {
     println!("{report}");
     let _ = std::fs::write(LOG_PATH, &report);
 
-    // Phase 2.2: open vita2d, draw a centered title in PGF text on a
-    // dark-slate background. Still no input handling (Phase 2.3); user
-    // exits via the PS button.
+    // Phase 2.3: render loop with input + IME debug rig.
+    // - Pad: poll buttons + analog sticks.
+    // - Touch: poll front panel.
+    // - X (Cross): open the IME modal. Type something, hit Enter.
+    // - On IME finish: stash the typed text and display it on screen.
+    //
+    // Exits when Render is dropped (user presses PS button to return to
+    // LiveArea).
     match bsky_render::Render::init() {
         Ok(mut render) => {
             render.set_clear_color(bsky_render::theme::BACKGROUND);
@@ -43,28 +48,116 @@ fn main() {
                 .load_default_pgf()
                 .expect("load default PGF font");
 
-            const TITLE: &str = "bsky-vita";
-            const SUBTITLE: &str = "phase 2 — render skeleton";
+            let mut pad = bsky_input::Pad::init();
+            let touch = bsky_input::Touch::init();
+            let mut ime = bsky_ime::Ime::new();
+            let mut last_typed: Option<String> = None;
+            let mut last_ime_status_msg: String = String::from("—");
 
             loop {
+                // ─── input ───────────────────────────────────────────────
+                let pf = pad.poll();
+                let tf = touch.poll();
+
+                // Open the IME on Cross (regardless of system enter-button
+                // pref — Phase 2.4 will honor it when widgets need it).
+                if pf.just_pressed(bsky_input::buttons::CROSS) && !ime.is_active() {
+                    match ime.open(
+                        "Test input",
+                        bsky_ime::ImeMode::BasicLatin,
+                        bsky_ime::TextBoxMode::Default,
+                        256,
+                        "",
+                    ) {
+                        Ok(()) => last_ime_status_msg = String::from("open"),
+                        Err(e) => last_ime_status_msg = format!("open failed: {e}"),
+                    }
+                }
+
+                // Advance the IME state machine. On finish/cancel/abort,
+                // drain the result and reset.
+                match ime.poll() {
+                    bsky_ime::ImeState::Finished(s) => {
+                        last_typed = Some(s);
+                        last_ime_status_msg = String::from("finished");
+                        ime.close();
+                    }
+                    bsky_ime::ImeState::Cancelled => {
+                        last_ime_status_msg = String::from("cancelled");
+                        ime.close();
+                    }
+                    bsky_ime::ImeState::Aborted => {
+                        last_ime_status_msg = String::from("aborted");
+                        ime.close();
+                    }
+                    _ => {}
+                }
+
+                // ─── draw ────────────────────────────────────────────────
                 let mut frame = render.begin_frame();
-                // Title: large, white, centered, slightly above middle.
-                let (_x, _y, _w, h) = frame.draw_text_centered(
-                    &font,
-                    bsky_render::SCREEN_HEIGHT / 2 - 8,
-                    bsky_render::theme::TEXT_PRIMARY,
-                    1.5,
-                    TITLE,
-                );
-                // Subtitle: smaller, muted, just below.
+
                 frame.draw_text_centered(
                     &font,
-                    bsky_render::SCREEN_HEIGHT / 2 + h + 8,
+                    80,
+                    bsky_render::theme::TEXT_PRIMARY,
+                    1.5,
+                    "bsky-vita",
+                );
+                frame.draw_text_centered(
+                    &font,
+                    120,
                     bsky_render::theme::TEXT_MUTED,
                     1.0,
-                    SUBTITLE,
+                    "phase 2.3 — input + ime debug rig",
                 );
-                // Drop swaps + vblank-waits (60 fps).
+
+                frame.draw_text_centered(
+                    &font,
+                    200,
+                    bsky_render::theme::TEXT_MUTED,
+                    0.9,
+                    "press X (cross) to open the keyboard",
+                );
+
+                let line_typed = match &last_typed {
+                    Some(s) => format!("last typed: {s}"),
+                    None => "last typed: (nothing yet)".to_string(),
+                };
+                frame.draw_text_centered(
+                    &font,
+                    280,
+                    bsky_render::theme::ACCENT,
+                    1.0,
+                    &line_typed,
+                );
+
+                let line_ime = format!("ime status: {last_ime_status_msg}");
+                frame.draw_text_centered(
+                    &font,
+                    320,
+                    bsky_render::theme::TEXT_MUTED,
+                    0.9,
+                    &line_ime,
+                );
+
+                let line_touch = format!(
+                    "buttons: {:#06x}   touches: {}",
+                    pf.current,
+                    tf.points.len()
+                );
+                frame.draw_text_centered(
+                    &font,
+                    360,
+                    bsky_render::theme::TEXT_MUTED,
+                    0.8,
+                    &line_touch,
+                );
+
+                // Drive the modal IME between our draws and the swap.
+                if ime.is_active() {
+                    frame.pump_ime();
+                }
+                // Frame's Drop swaps buffers + vblank-waits.
             }
         }
         Err(e) => {

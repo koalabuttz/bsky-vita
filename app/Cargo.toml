@@ -27,10 +27,12 @@ atrium-api  = { workspace = true }
 serde_json  = { workspace = true }
 futures     = { workspace = true }
 
-# Phase 2.1: render skeleton.
+# Phase 2.1+: render skeleton.
 bsky-render = { path = "../crates/bsky-render" }
+bsky-input  = { path = "../crates/bsky-input" }
+bsky-ime    = { path = "../crates/bsky-ime" }
 
-# bsky-input, bsky-ime, bsky-ui come in 2.3+ as the UI fills in.
+# bsky-ui comes in 2.4 with widgets + screens.
 
 [[bin]]
 name = "bsky-vita"

@@ -209,6 +209,8 @@ version = "0.1.0"
 dependencies = [
  "atrium-api",
  "bsky-auth",
+ "bsky-ime",
+ "bsky-input",
  "bsky-models",
  "bsky-net",
  "bsky-render",
