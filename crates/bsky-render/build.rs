@@ -35,6 +35,9 @@ fn main() {
             "png",
             "z",
             "bz2",
+            // libjpeg (Phase 3.4) — vita2d's vita2d_load_JPEG_buffer
+            // dispatches into IJG-baseline libjpeg for JPEG decoding.
+            "jpeg",
             // Sony module stubs vita2d/vita2d_ext reference. Listed in
             // dependency order: graphics first, then PGF/PVF for the
             // system font loaders, then kernel/sysmem/app-mgr basics.

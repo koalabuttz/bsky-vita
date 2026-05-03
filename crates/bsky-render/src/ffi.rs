@@ -13,7 +13,7 @@
 
 #![allow(non_camel_case_types, non_snake_case, dead_code)]
 
-use core::ffi::{c_char, c_float, c_int, c_uint};
+use core::ffi::{c_char, c_float, c_int, c_uint, c_ulong, c_void};
 
 // `vita2d.h` declares `vita2d_pgf`, `vita2d_pvf`, `vita2d_font`, and
 // `vita2d_texture` as forward-declared structs we never inspect directly.
@@ -108,5 +108,46 @@ unsafe extern "C" {
         text: *const c_char,
         width: *mut c_int,
         height: *mut c_int,
+    );
+
+    // Texture lifecycle + image loaders (Phase 3.4). PNG buffer takes no
+    // size — vita2d's PNG path reads the file-length header from the PNG
+    // itself; JPEG takes an explicit size since JPEG has no length header.
+    pub fn vita2d_load_PNG_buffer(buffer: *const c_void) -> *mut vita2d_texture;
+    pub fn vita2d_load_PNG_file(filename: *const c_char) -> *mut vita2d_texture;
+    pub fn vita2d_load_JPEG_buffer(
+        buffer: *const c_void,
+        buffer_size: c_ulong,
+    ) -> *mut vita2d_texture;
+    pub fn vita2d_free_texture(texture: *mut vita2d_texture);
+
+    pub fn vita2d_texture_get_width(texture: *const vita2d_texture) -> c_uint;
+    pub fn vita2d_texture_get_height(texture: *const vita2d_texture) -> c_uint;
+
+    // Draw variants. The `_part_scale` form picks a sub-rectangle from
+    // the source texture (atlas) and scales it independently per axis —
+    // exactly what we need for emoji glyph rendering.
+    pub fn vita2d_draw_texture(
+        texture: *const vita2d_texture,
+        x: c_float,
+        y: c_float,
+    );
+    pub fn vita2d_draw_texture_scale(
+        texture: *const vita2d_texture,
+        x: c_float,
+        y: c_float,
+        x_scale: c_float,
+        y_scale: c_float,
+    );
+    pub fn vita2d_draw_texture_part_scale(
+        texture: *const vita2d_texture,
+        x: c_float,
+        y: c_float,
+        tex_x: c_float,
+        tex_y: c_float,
+        tex_w: c_float,
+        tex_h: c_float,
+        x_scale: c_float,
+        y_scale: c_float,
     );
 }

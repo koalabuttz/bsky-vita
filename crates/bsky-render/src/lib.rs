@@ -32,6 +32,10 @@
 
 #[cfg(target_os = "vita")]
 mod ffi;
+// ATLAS_COLS / ATLAS_ROWS are used by external tooling readers; keep
+// them in the generated file for documentation even if unread by us.
+#[allow(dead_code)]
+mod emoji_table;
 
 #[cfg(target_os = "vita")]
 use core::ffi::c_uint;
@@ -94,6 +98,10 @@ pub enum RenderError {
     /// `vita2d_load_font_file` returned a null pointer (asset missing,
     /// corrupt, or FreeType failed to parse).
     TtfLoad,
+    /// `vita2d_load_PNG_*` or `vita2d_load_JPEG_*` returned a null
+    /// pointer (asset missing, corrupt, or unsupported format).
+    /// The `&'static str` carries which loader failed.
+    TextureLoad(&'static str),
     /// Method was called on a non-Vita target where rendering is unavailable.
     NotOnVita,
 }
@@ -104,6 +112,7 @@ impl core::fmt::Display for RenderError {
             RenderError::Init(code) => write!(f, "vita2d_init failed: {code}"),
             RenderError::PgfLoad => write!(f, "vita2d_load_default_pgf returned null"),
             RenderError::TtfLoad => write!(f, "vita2d_load_font_file returned null"),
+            RenderError::TextureLoad(what) => write!(f, "texture load failed ({what})"),
             RenderError::NotOnVita => write!(f, "render is only supported on the Vita target"),
         }
     }
@@ -284,6 +293,151 @@ impl Drop for Font {
                 Font::Ttf(p) => ffi::vita2d_free_font(p.as_ptr()),
             }
         }
+    }
+}
+
+/// A loaded GPU texture handle (vita2d-backed). Created from PNG or JPEG
+/// bytes (in-memory) or a PNG file. Single-threaded; freed via
+/// `vita2d_free_texture` on Drop. Held by [`EmojiAtlas`] and
+/// [`TextureCache`].
+pub struct Texture {
+    #[cfg(target_os = "vita")]
+    ptr: NonNull<ffi::vita2d_texture>,
+    width: i32,
+    height: i32,
+}
+
+impl Texture {
+    /// Decode `bytes` as PNG. Returns [`RenderError::TextureLoad`] if the
+    /// data isn't a valid PNG (or vita2d's PNG path otherwise rejects it).
+    pub fn from_png_bytes(bytes: &[u8]) -> Result<Self, RenderError> {
+        // PNG magic: 0x89 'P' 'N' 'G' 0x0D 0x0A 0x1A 0x0A
+        if bytes.len() < 8 || &bytes[..8] != b"\x89PNG\r\n\x1a\n" {
+            return Err(RenderError::TextureLoad("PNG: bad magic"));
+        }
+        #[cfg(target_os = "vita")]
+        {
+            let p = unsafe { ffi::vita2d_load_PNG_buffer(bytes.as_ptr() as *const _) };
+            Self::wrap_raw(p, "PNG")
+        }
+        #[cfg(not(target_os = "vita"))]
+        {
+            let _ = bytes;
+            Err(RenderError::NotOnVita)
+        }
+    }
+
+    /// Decode `bytes` as JPEG.
+    pub fn from_jpeg_bytes(bytes: &[u8]) -> Result<Self, RenderError> {
+        // JPEG magic: 0xFF 0xD8 0xFF
+        if bytes.len() < 3 || bytes[0] != 0xFF || bytes[1] != 0xD8 || bytes[2] != 0xFF {
+            return Err(RenderError::TextureLoad("JPEG: bad magic"));
+        }
+        #[cfg(target_os = "vita")]
+        {
+            let p = unsafe {
+                ffi::vita2d_load_JPEG_buffer(bytes.as_ptr() as *const _, bytes.len() as _)
+            };
+            Self::wrap_raw(p, "JPEG")
+        }
+        #[cfg(not(target_os = "vita"))]
+        {
+            let _ = bytes;
+            Err(RenderError::NotOnVita)
+        }
+    }
+
+    /// Auto-detect PNG vs JPEG from magic bytes and dispatch.
+    pub fn from_image_bytes(bytes: &[u8]) -> Result<Self, RenderError> {
+        if bytes.len() >= 8 && &bytes[..8] == b"\x89PNG\r\n\x1a\n" {
+            Self::from_png_bytes(bytes)
+        } else if bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF {
+            Self::from_jpeg_bytes(bytes)
+        } else {
+            Err(RenderError::TextureLoad("unknown image format"))
+        }
+    }
+
+    /// Load a PNG from a Vita filesystem path (e.g. `app0:twemoji.png`).
+    pub fn from_png_file(path: &str) -> Result<Self, RenderError> {
+        #[cfg(target_os = "vita")]
+        {
+            // vita2d_load_PNG_file crashes on missing files (same bug as
+            // vita2d_load_font_file). Pre-check via std::fs to keep the
+            // fallback path safe.
+            if std::fs::metadata(path).is_err() {
+                return Err(RenderError::TextureLoad("PNG: file not found"));
+            }
+            let cstr = CString::new(path)
+                .map_err(|_| RenderError::TextureLoad("PNG: path has interior NUL"))?;
+            let p = unsafe { ffi::vita2d_load_PNG_file(cstr.as_ptr()) };
+            Self::wrap_raw(p, "PNG (file)")
+        }
+        #[cfg(not(target_os = "vita"))]
+        {
+            let _ = path;
+            Err(RenderError::NotOnVita)
+        }
+    }
+
+    pub fn width(&self) -> i32 {
+        self.width
+    }
+    pub fn height(&self) -> i32 {
+        self.height
+    }
+
+    #[cfg(target_os = "vita")]
+    fn wrap_raw(
+        p: *mut ffi::vita2d_texture,
+        what: &'static str,
+    ) -> Result<Self, RenderError> {
+        let ptr = NonNull::new(p).ok_or(RenderError::TextureLoad(what))?;
+        let width = unsafe { ffi::vita2d_texture_get_width(ptr.as_ptr()) } as i32;
+        let height = unsafe { ffi::vita2d_texture_get_height(ptr.as_ptr()) } as i32;
+        Ok(Self {
+            ptr,
+            width,
+            height,
+        })
+    }
+}
+
+impl Drop for Texture {
+    fn drop(&mut self) {
+        #[cfg(target_os = "vita")]
+        unsafe {
+            ffi::vita2d_free_texture(self.ptr.as_ptr());
+        }
+    }
+}
+
+/// Color emoji sprite atlas + codepoint→cell lookup table. Loads
+/// `twemoji.png` (a single PNG with 64×64 cells in a 16-column grid) and
+/// exposes [`EmojiAtlas::lookup`] to find a codepoint's atlas cell.
+///
+/// Construct with [`EmojiAtlas::from_path`] at startup; pass a borrow
+/// through `UiCtx` to screens that render emoji-bearing text.
+pub struct EmojiAtlas {
+    texture: Texture,
+}
+
+impl EmojiAtlas {
+    pub fn from_path(path: &str) -> Result<Self, RenderError> {
+        Ok(Self {
+            texture: Texture::from_png_file(path)?,
+        })
+    }
+
+    /// Look up a codepoint's atlas cell. `None` if the codepoint isn't
+    /// in the bundled set; the caller falls back to TTF text rendering.
+    pub fn lookup(&self, codepoint: u32) -> Option<(u16, u16)> {
+        emoji_table::lookup(codepoint)
+    }
+
+    /// Underlying texture (for direct draw via `Frame::draw_texture_part_scale`).
+    pub fn texture(&self) -> &Texture {
+        &self.texture
     }
 }
 
@@ -610,6 +764,334 @@ impl<'r> Frame<'r> {
                 self.ended = true;
             }
             ffi::vita2d_common_dialog_update();
+        }
+    }
+
+    // ─── Texture drawing (Phase 3.4) ───────────────────────────────
+
+    /// Draw `tex` at its native size with top-left at `(x, y)`.
+    pub fn draw_texture(&mut self, tex: &Texture, x: f32, y: f32) {
+        #[cfg(target_os = "vita")]
+        unsafe {
+            ffi::vita2d_draw_texture(tex.ptr.as_ptr(), x, y);
+        }
+        #[cfg(not(target_os = "vita"))]
+        {
+            let _ = (tex, x, y);
+        }
+    }
+
+    /// Draw `tex` scaled by `(x_scale, y_scale)` with top-left at `(x, y)`.
+    pub fn draw_texture_scale(
+        &mut self,
+        tex: &Texture,
+        x: f32,
+        y: f32,
+        x_scale: f32,
+        y_scale: f32,
+    ) {
+        #[cfg(target_os = "vita")]
+        unsafe {
+            ffi::vita2d_draw_texture_scale(tex.ptr.as_ptr(), x, y, x_scale, y_scale);
+        }
+        #[cfg(not(target_os = "vita"))]
+        {
+            let _ = (tex, x, y, x_scale, y_scale);
+        }
+    }
+
+    /// Draw the `(src_w × src_h)` sub-rectangle of `tex` at source
+    /// position `(src_x, src_y)`, placed at screen position `(x, y)` and
+    /// scaled by `(x_scale, y_scale)`. Used for sprite-atlas rendering
+    /// (e.g., color emoji glyphs from the Twemoji atlas).
+    pub fn draw_texture_part_scale(
+        &mut self,
+        tex: &Texture,
+        x: f32,
+        y: f32,
+        src_x: f32,
+        src_y: f32,
+        src_w: f32,
+        src_h: f32,
+        x_scale: f32,
+        y_scale: f32,
+    ) {
+        #[cfg(target_os = "vita")]
+        unsafe {
+            ffi::vita2d_draw_texture_part_scale(
+                tex.ptr.as_ptr(),
+                x,
+                y,
+                src_x,
+                src_y,
+                src_w,
+                src_h,
+                x_scale,
+                y_scale,
+            );
+        }
+        #[cfg(not(target_os = "vita"))]
+        {
+            let _ = (tex, x, y, src_x, src_y, src_w, src_h, x_scale, y_scale);
+        }
+    }
+
+    // ─── Emoji-aware text drawing (Phase 3.4) ──────────────────────
+    //
+    // These mirror the plain-text methods but accept an optional
+    // [`EmojiAtlas`]. When `emoji = None`, behavior is identical to the
+    // plain-text variant. When `Some`, codepoints in the bundled set are
+    // rendered as textured quads from the atlas inline with the
+    // surrounding text run.
+    //
+    // The wrap loop treats whitespace as the only word boundary; an
+    // emoji codepoint in the middle of a word is rendered inline without
+    // forcing a break. Emoji width contributes to the running line
+    // width as `BASE_SIZE_PX * scale` pixels.
+
+    /// Single-line emoji-aware draw. Returns the next-x position past
+    /// the last drawn glyph or emoji.
+    pub fn draw_text_with_emoji(
+        &mut self,
+        font: &Font,
+        x: i32,
+        y: i32,
+        color: Color,
+        scale: f32,
+        text: &str,
+        emoji: Option<&EmojiAtlas>,
+    ) -> i32 {
+        match emoji {
+            None => self.draw_text(font, x, y, color, scale, text),
+            Some(atlas) => self.draw_word_with_emoji(font, x, y, color, scale, text, atlas),
+        }
+    }
+
+    /// Word-wrapped emoji-aware draw. Mirrors `draw_text_wrapped`'s
+    /// structure but substitutes emoji-aware width measurement and
+    /// glyph drawing per word.
+    pub fn draw_text_wrapped_with_emoji(
+        &mut self,
+        font: &Font,
+        x: i32,
+        y: i32,
+        max_w: i32,
+        color: Color,
+        scale: f32,
+        text: &str,
+        emoji: Option<&EmojiAtlas>,
+    ) -> i32 {
+        let Some(atlas) = emoji else {
+            return self.draw_text_wrapped(font, x, y, max_w, color, scale, text);
+        };
+        if text.is_empty() {
+            return 0;
+        }
+        let (_, ref_h) = self.measure_text(font, scale, "Hg");
+        let line_h = ref_h + 4;
+        let space_w = self.measure_text(font, scale, " ").0;
+        let mut y_cursor = y;
+
+        for paragraph in text.split('\n') {
+            let mut line_words: Vec<&str> = Vec::new();
+            let mut line_width: i32 = 0;
+            for word in paragraph.split_whitespace() {
+                let w = self.measure_word_with_emoji(font, scale, word, atlas);
+                let needed = if line_words.is_empty() {
+                    w
+                } else {
+                    space_w + w
+                };
+                if line_width + needed <= max_w {
+                    line_words.push(word);
+                    line_width += needed;
+                    continue;
+                }
+                // Doesn't fit on the current line. Flush, start new line.
+                if !line_words.is_empty() {
+                    self.draw_words_with_emoji(
+                        font, x, y_cursor, color, scale, &line_words, space_w, atlas,
+                    );
+                    y_cursor += line_h;
+                }
+                line_words = vec![word];
+                line_width = w;
+            }
+            if !line_words.is_empty() {
+                self.draw_words_with_emoji(
+                    font, x, y_cursor, color, scale, &line_words, space_w, atlas,
+                );
+                y_cursor += line_h;
+            }
+        }
+        y_cursor - y
+    }
+
+    /// Measurement-only counterpart to `draw_text_wrapped_with_emoji`.
+    pub fn measure_text_wrapped_with_emoji(
+        &self,
+        font: &Font,
+        max_w: i32,
+        scale: f32,
+        text: &str,
+        emoji: Option<&EmojiAtlas>,
+    ) -> i32 {
+        let Some(atlas) = emoji else {
+            return self.measure_text_wrapped(font, max_w, scale, text);
+        };
+        if text.is_empty() {
+            return 0;
+        }
+        let (_, ref_h) = self.measure_text(font, scale, "Hg");
+        let line_h = ref_h + 4;
+        let space_w = self.measure_text(font, scale, " ").0;
+        let mut y_cursor = 0;
+        for paragraph in text.split('\n') {
+            let mut line_width: i32 = 0;
+            let mut has_words = false;
+            for word in paragraph.split_whitespace() {
+                let w = self.measure_word_with_emoji(font, scale, word, atlas);
+                let needed = if !has_words { w } else { space_w + w };
+                if line_width + needed <= max_w {
+                    line_width += needed;
+                    has_words = true;
+                } else {
+                    if has_words {
+                        y_cursor += line_h;
+                    }
+                    line_width = w;
+                    has_words = true;
+                }
+            }
+            if has_words {
+                y_cursor += line_h;
+            }
+        }
+        y_cursor
+    }
+
+    // ─── Private helpers for emoji-aware rendering ────────────────
+
+    /// Width of `word` (no whitespace, may contain emoji codepoints) at
+    /// `scale`. Each emoji contributes one text-line-height of width
+    /// (size in pixels matches the surrounding text size).
+    fn measure_word_with_emoji(
+        &self,
+        font: &Font,
+        scale: f32,
+        word: &str,
+        atlas: &EmojiAtlas,
+    ) -> i32 {
+        let emoji_w = self.emoji_render_size(scale);
+        let mut total: i32 = 0;
+        let mut text_buf = String::new();
+        for ch in word.chars() {
+            if atlas.lookup(ch as u32).is_some() {
+                if !text_buf.is_empty() {
+                    total += self.measure_text(font, scale, &text_buf).0;
+                    text_buf.clear();
+                }
+                total += emoji_w;
+            } else {
+                text_buf.push(ch);
+            }
+        }
+        if !text_buf.is_empty() {
+            total += self.measure_text(font, scale, &text_buf).0;
+        }
+        total
+    }
+
+    /// Draw one mixed-emoji-and-text word at `(x, y)`. Returns the
+    /// next-x past the last drawn glyph/emoji.
+    ///
+    /// Advances `current_x` via `measure_text`, NOT `draw_text`'s return
+    /// value — vita2d's `font_draw_text` returns the relative width
+    /// drawn (not the absolute pen position), which would cause every
+    /// subsequent chained draw to pile up at line start. measure_text is
+    /// authoritative for both PGF and TTF.
+    fn draw_word_with_emoji(
+        &mut self,
+        font: &Font,
+        x: i32,
+        y: i32,
+        color: Color,
+        scale: f32,
+        word: &str,
+        atlas: &EmojiAtlas,
+    ) -> i32 {
+        let emoji_w = self.emoji_render_size(scale);
+        let cell = emoji_table::CELL_PX as f32;
+        let scale_factor = emoji_w as f32 / cell;
+        let emoji_y_top = y - emoji_w; // baseline at y → bottom of emoji at y
+
+        let mut current_x = x;
+        let mut text_buf = String::new();
+        for ch in word.chars() {
+            if let Some((col, row)) = atlas.lookup(ch as u32) {
+                if !text_buf.is_empty() {
+                    self.draw_text(font, current_x, y, color, scale, &text_buf);
+                    current_x += self.measure_text(font, scale, &text_buf).0;
+                    text_buf.clear();
+                }
+                self.draw_texture_part_scale(
+                    atlas.texture(),
+                    current_x as f32,
+                    emoji_y_top as f32,
+                    col as f32 * cell,
+                    row as f32 * cell,
+                    cell,
+                    cell,
+                    scale_factor,
+                    scale_factor,
+                );
+                current_x += emoji_w;
+            } else {
+                text_buf.push(ch);
+            }
+        }
+        if !text_buf.is_empty() {
+            self.draw_text(font, current_x, y, color, scale, &text_buf);
+            current_x += self.measure_text(font, scale, &text_buf).0;
+        }
+        current_x
+    }
+
+    /// Draw a sequence of words (separated by `space_w`) on one line at
+    /// `(x, y)`. Used by `draw_text_wrapped_with_emoji`.
+    fn draw_words_with_emoji(
+        &mut self,
+        font: &Font,
+        x: i32,
+        y: i32,
+        color: Color,
+        scale: f32,
+        words: &[&str],
+        space_w: i32,
+        atlas: &EmojiAtlas,
+    ) {
+        let mut current_x = x;
+        for (i, word) in words.iter().enumerate() {
+            if i > 0 {
+                current_x += space_w;
+            }
+            current_x = self.draw_word_with_emoji(font, current_x, y, color, scale, word, atlas);
+        }
+    }
+
+    /// Compute the on-screen rendered size (width and height) of an
+    /// emoji glyph at the given text `scale`. Emoji match the surrounding
+    /// text height — at scale 1.0 → 20 px (BASE_SIZE_PX) on Vita.
+    #[inline]
+    fn emoji_render_size(&self, scale: f32) -> i32 {
+        #[cfg(target_os = "vita")]
+        {
+            scale_to_px(scale) as i32
+        }
+        #[cfg(not(target_os = "vita"))]
+        {
+            let _ = scale;
+            16
         }
     }
 }

@@ -15,7 +15,7 @@
 //! without lifting does NOT fire a click.
 
 use bsky_input::{PadFrame, TouchPoint};
-use bsky_render::{theme, Color, Font, Frame};
+use bsky_render::{theme, Color, EmojiAtlas, Font, Frame};
 use bsky_worker::Worker;
 
 /// Simple axis-aligned rectangle in display-pixel coordinates.
@@ -44,10 +44,17 @@ impl Rect {
 /// `worker` is `None` while still in pre-auth screens (LoginScreen) and
 /// `Some` for everything that runs after `ScreenAction::AuthComplete`.
 /// Post-auth screens can `unwrap` it; pre-auth screens shouldn't touch it.
+///
+/// `emoji` is `None` if the Twemoji atlas asset isn't on the device
+/// (`app0:twemoji.png` missing); screens render emoji codepoints as Inter
+/// fallback (tofu) in that case. `Some` when the asset loaded
+/// successfully — pass to `Frame::draw_text_*_with_emoji` to render
+/// color emoji inline.
 pub struct UiCtx<'a> {
     pub touches: &'a [TouchPoint],
     pub pad: &'a PadFrame,
     pub worker: Option<&'a Worker>,
+    pub emoji: Option<&'a EmojiAtlas>,
 }
 
 #[derive(Default)]

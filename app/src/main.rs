@@ -17,7 +17,7 @@
 //! *before* the worker exists.
 
 use bsky_input::{Pad, Touch};
-use bsky_render::Render;
+use bsky_render::{EmojiAtlas, Render};
 use bsky_ui::{LoginScreen, Screen, ScreenAction, UiCtx};
 use bsky_worker::Worker;
 
@@ -49,6 +49,21 @@ fn main() {
         }
     };
 
+    // Phase 3.4: optional Twemoji color-emoji atlas. If the asset is
+    // missing on the device, emoji codepoints render as Inter fallback
+    // (tofu) — app boots fine. Run `make push-emoji` to upload the
+    // ~2.5 MB atlas separately from `make run`'s eboot.bin push.
+    let emoji_atlas: Option<EmojiAtlas> = match EmojiAtlas::from_path("app0:twemoji.png") {
+        Ok(a) => Some(a),
+        Err(e) => {
+            eprintln!(
+                "Twemoji atlas load failed ({e}); emoji codepoints will render \
+                 as TTF fallback. Run 'make push-emoji' to upload twemoji.png."
+            );
+            None
+        }
+    };
+
     let mut pad = Pad::init();
     let touch = Touch::init();
     let mut ime = bsky_ime::Ime::new();
@@ -69,6 +84,7 @@ fn main() {
             touches: &tf.points,
             pad: &pf,
             worker: worker.as_ref(),
+            emoji: emoji_atlas.as_ref(),
         };
 
         // Render + collect transition action. The Frame's Drop happens

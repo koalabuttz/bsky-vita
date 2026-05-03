@@ -31,7 +31,7 @@ use atrium_api::types::{TryFromUnknown, Unknown};
 use bsky_auth::AuthClient;
 use bsky_ime::Ime;
 use bsky_input::buttons;
-use bsky_render::{theme, Font, Frame, SCREEN_HEIGHT, SCREEN_WIDTH};
+use bsky_render::{theme, EmojiAtlas, Font, Frame, SCREEN_HEIGHT, SCREEN_WIDTH};
 use bsky_worker::{WorkRequest, WorkResponse};
 
 use crate::profile::ProfileScreen;
@@ -161,7 +161,7 @@ impl Screen for TimelineScreen {
         if let TimelineState::Loaded { posts, .. } = &self.state {
             while self.row_heights.len() < posts.len() {
                 let i = self.row_heights.len();
-                let h = measure_post_row(frame, font, &posts[i]);
+                let h = measure_post_row(frame, font, &posts[i], ctx.emoji);
                 self.row_heights.push(h);
             }
         }
@@ -223,6 +223,7 @@ impl Screen for TimelineScreen {
                         posts,
                         &self.row_heights,
                         self.scroll_y,
+                        ctx.emoji,
                     );
                     if self.fetching_more {
                         let bottom_y = HEADER_H + total_h - self.scroll_y as i32 + 8;
@@ -320,10 +321,15 @@ impl Screen for TimelineScreen {
 
 /// Compute one post row's total height (without drawing). Mirrors the
 /// layout in [`draw_post_row`].
-fn measure_post_row(frame: &Frame, font: &Font, post: &FeedViewPost) -> i32 {
+fn measure_post_row(
+    frame: &Frame,
+    font: &Font,
+    post: &FeedViewPost,
+    emoji: Option<&EmojiAtlas>,
+) -> i32 {
     let inner_w = SCREEN_WIDTH - 2 * ROW_PAD_X;
     let body_text = extract_post_text(&post.post.record).unwrap_or_default();
-    let body_h = frame.measure_text_wrapped(font, inner_w, 1.0, &body_text);
+    let body_h = frame.measure_text_wrapped_with_emoji(font, inner_w, 1.0, &body_text, emoji);
     ROW_PAD_Y + TOP_LINE_H + body_h + BODY_GAP + FOOTER_H
 }
 
@@ -335,12 +341,13 @@ fn draw_post_list(
     posts: &[FeedViewPost],
     row_heights: &[i32],
     scroll_y: f32,
+    emoji: Option<&EmojiAtlas>,
 ) {
     let mut y = HEADER_H - scroll_y as i32;
     for (post, &row_h) in posts.iter().zip(row_heights.iter()) {
         let row_bottom = y + row_h;
         if row_bottom > VIEWPORT_TOP && y < SCREEN_HEIGHT {
-            draw_post_row(frame, font, post, y, row_h);
+            draw_post_row(frame, font, post, y, row_h, emoji);
         }
         y += row_h;
     }
@@ -354,6 +361,7 @@ fn draw_post_row(
     post: &FeedViewPost,
     y_top: i32,
     row_h: i32,
+    emoji: Option<&EmojiAtlas>,
 ) {
     let row_left = 0;
     let row_right = SCREEN_WIDTH;
@@ -376,10 +384,10 @@ fn draw_post_row(
     let hx = row_right - ROW_PAD_X - hw;
     frame.draw_text(font, hx, top_y + 4, theme::TEXT_MUTED, 0.85, &handle);
 
-    // Body text (wrapped).
+    // Body text (wrapped, emoji-aware).
     let body_text = extract_post_text(&post.post.record).unwrap_or_default();
     let body_y = top_y + TOP_LINE_H;
-    let body_h = frame.draw_text_wrapped(
+    let body_h = frame.draw_text_wrapped_with_emoji(
         font,
         inner_left,
         body_y,
@@ -387,6 +395,7 @@ fn draw_post_row(
         theme::TEXT_PRIMARY,
         1.0,
         &body_text,
+        emoji,
     );
 
     // Counts row.

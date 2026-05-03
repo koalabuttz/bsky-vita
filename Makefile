@@ -2,7 +2,7 @@ APP_DIR := app
 TITLE_ID := BSKY00001
 VPK := target/armv7-sony-vita-newlibeabihf/release/bsky-vita.vpk
 
-.PHONY: build run install push-creds fetch-log test clean help
+.PHONY: build run install push-creds push-font push-emoji fetch-log test clean help
 
 help:
 	@echo "Targets:"
@@ -10,11 +10,17 @@ help:
 	@echo "  install      First-time only: upload VPK to ux0:/download/ — install via VitaShell"
 	@echo "  run          Fast iteration: rebuild + push eboot.bin + launch (app must be installed)"
 	@echo "  push-creds   Upload local credentials.toml to ux0:/data/$(TITLE_ID)/credentials.toml"
+	@echo "  push-font    Upload app/static/Inter-Regular.ttf to ux0:/app/$(TITLE_ID)/ (one-shot)"
+	@echo "  push-emoji   Upload app/static/twemoji.png to ux0:/app/$(TITLE_ID)/ (one-shot, ~2.5 MB)"
 	@echo "  fetch-log    Pull ux0:data/$(TITLE_ID)/spike.log via vitacompanion FTP"
 	@echo "  test         Host-side library tests (excludes the Vita-target bin)"
 	@echo "  clean        Remove build artifacts"
 	@echo
-	@echo "Required env: VITA_IP=<vita.lan.ip> for install/run/push-creds/fetch-log"
+	@echo "Required env: VITA_IP=<vita.lan.ip> for install/run/push-*/fetch-log"
+	@echo
+	@echo "Big-asset workflow: 'make run' only updates eboot.bin (~5 MB). New or"
+	@echo "changed assets in app/static/ require an explicit push (push-font /"
+	@echo "push-emoji), or a full reinstall via 'make install'."
 
 build:
 	cd $(APP_DIR) && cargo vita build vpk -- --release
@@ -53,6 +59,37 @@ fetch-log:
 	@if [ -z "$$VITA_IP" ]; then echo "VITA_IP env var not set"; exit 1; fi
 	curl -sS --connect-timeout 5 --max-time 15 \
 		"ftp://$$VITA_IP:1337/ux0:/data/$(TITLE_ID)/spike.log"
+
+# Push the Inter TTF (~680 KB). Required once before the app first reads
+# `app0:Inter-Regular.ttf`; subsequent rebuilds via `make run` re-use the
+# already-pushed file. Re-run if the file in app/static changes.
+push-font:
+	@if [ -z "$$VITA_IP" ]; then echo "VITA_IP env var not set"; exit 1; fi
+	@if [ ! -f app/static/Inter-Regular.ttf ]; then \
+		echo "app/static/Inter-Regular.ttf not found."; \
+		echo "Drop the static Inter TTF in there first (see render_decisions memory)."; \
+		exit 1; \
+	fi
+	curl -sS --connect-timeout 5 --max-time 60 \
+		-T app/static/Inter-Regular.ttf \
+		"ftp://$$VITA_IP:1337/ux0:/app/$(TITLE_ID)/Inter-Regular.ttf"
+	@echo "Inter-Regular.ttf pushed."
+
+# Push the Twemoji color-emoji atlas (~2.5 MB). Required once before the
+# app first reads `app0:twemoji.png`. Vitacompanion's FTP can be flaky on
+# big files (550 'Could not allocate memory') — if it fails, try again or
+# destroy the running app first to free memory.
+push-emoji:
+	@if [ -z "$$VITA_IP" ]; then echo "VITA_IP env var not set"; exit 1; fi
+	@if [ ! -f app/static/twemoji.png ]; then \
+		echo "app/static/twemoji.png not found."; \
+		echo "Run 'python tools/build-twemoji.py' to generate it."; \
+		exit 1; \
+	fi
+	curl -sS --connect-timeout 5 --max-time 120 \
+		-T app/static/twemoji.png \
+		"ftp://$$VITA_IP:1337/ux0:/app/$(TITLE_ID)/twemoji.png"
+	@echo "twemoji.png pushed."
 
 # Library crates have no Vita-specific config and default to the host triple.
 # The bin crate (bsky-vita-app) is target-locked to Vita and excluded here.
