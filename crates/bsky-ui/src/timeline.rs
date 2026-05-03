@@ -24,6 +24,7 @@
 //! - Repost / reply context ("X reposted", "Replying to @Y").
 //! - Tap-a-post → thread view (Phase 4+).
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use atrium_api::app::bsky::feed::defs::FeedViewPost;
@@ -31,9 +32,12 @@ use atrium_api::types::{TryFromUnknown, Unknown};
 use bsky_auth::AuthClient;
 use bsky_ime::Ime;
 use bsky_input::buttons;
-use bsky_render::{theme, EmojiAtlas, Font, Frame, SCREEN_HEIGHT, SCREEN_WIDTH};
+use bsky_render::{
+    theme, Color, EmojiAtlas, Font, Frame, Texture, TextureCache, SCREEN_HEIGHT, SCREEN_WIDTH,
+};
 use bsky_worker::{WorkRequest, WorkResponse};
 
+use crate::cdn::avatar_thumbnail_jpeg;
 use crate::profile::ProfileScreen;
 use crate::screen::{Screen, ScreenAction};
 use crate::widget::UiCtx;
@@ -48,6 +52,11 @@ const VIEWPORT_H: i32 = SCREEN_HEIGHT - HEADER_H;
 
 /// Side margins inside a post row.
 const ROW_PAD_X: i32 = 16;
+/// Avatar dimensions in the timeline post row.
+const AVATAR_SIZE: i32 = 48;
+/// Where text starts inside a row, accounting for the avatar slot:
+/// ROW_PAD_X (left margin) + AVATAR_SIZE + 8 px gutter.
+const TEXT_LEFT: i32 = ROW_PAD_X + AVATAR_SIZE + 8;
 /// Vertical padding inside a row (above display name, below counts).
 /// 20 px clears the ascender of 20 px text (ascender ~15–16 px above
 /// baseline), preventing letter tops from overlapping the previous
@@ -100,6 +109,11 @@ pub struct TimelineScreen {
     /// Cached row heights, parallel to `posts` in TimelineState::Loaded.
     /// Lazily extended in `frame()` when posts.len() > row_heights.len().
     row_heights: Vec<i32>,
+    /// Avatar URLs we've dispatched fetches for AND haven't received a
+    /// successful response for. On Ok response → cleared (allows re-fetch
+    /// after eviction). On Err response → kept (don't retry-storm a
+    /// failing URL during this session).
+    inflight_avatars: HashSet<String>,
 }
 
 impl TimelineScreen {
@@ -111,6 +125,7 @@ impl TimelineScreen {
             dispatched: false,
             fetching_more: false,
             row_heights: Vec::new(),
+            inflight_avatars: HashSet::new(),
         }
     }
 }
@@ -196,6 +211,34 @@ impl Screen for TimelineScreen {
             }
         }
 
+        // ─── 5b. Avatar dispatch for visible posts. ───────────────────
+        // For each post that will be drawn this frame, check if its
+        // avatar URL is already cached or in flight. If neither, fire a
+        // FetchImage request. The actual render uses the cache; misses
+        // show a placeholder.
+        if let TimelineState::Loaded { posts, .. } = &self.state {
+            if let Some(worker) = ctx.worker {
+                let mut y_probe = HEADER_H - self.scroll_y as i32;
+                for (post, &row_h) in posts.iter().zip(self.row_heights.iter()) {
+                    let row_bottom = y_probe + row_h;
+                    if row_bottom > VIEWPORT_TOP && y_probe < SCREEN_HEIGHT {
+                        if let Some(url) = post.post.author.avatar.as_ref() {
+                            // Transform the URL so cache lookup and fetch
+                            // use the same vita2d-compatible JPEG variant.
+                            let url = avatar_thumbnail_jpeg(url);
+                            if !ctx.texture_cache.contains(&url)
+                                && !self.inflight_avatars.contains(&url)
+                            {
+                                worker.send(WorkRequest::FetchImage { url: url.clone() });
+                                self.inflight_avatars.insert(url);
+                            }
+                        }
+                    }
+                    y_probe += row_h;
+                }
+            }
+        }
+
         // ─── 6. Render content (post list, then sticky header on top). ─
         match &self.state {
             TimelineState::Loading => {
@@ -224,6 +267,8 @@ impl Screen for TimelineScreen {
                         &self.row_heights,
                         self.scroll_y,
                         ctx.emoji,
+                        ctx.texture_cache,
+                        ctx.avatar_mask,
                     );
                     if self.fetching_more {
                         let bottom_y = HEADER_H + total_h - self.scroll_y as i32 + 8;
@@ -315,6 +360,18 @@ impl Screen for TimelineScreen {
             // dispatched one and the user transitioned before the response
             // landed. Ignore them — ProfileScreen is gone.
             WorkResponse::Profile(_) => {}
+            // Image responses. On Ok: cache populated by main.rs; clear
+            // inflight so future evict + re-fetch works. On Err: KEEP
+            // url in inflight_avatars permanently for this session, so
+            // we don't retry-storm. (Phase 4 may add a manual retry.)
+            WorkResponse::Image { url, bytes } => match bytes {
+                Ok(_) => {
+                    self.inflight_avatars.remove(&url);
+                }
+                Err(_) => {
+                    // Leave url in inflight_avatars (don't retry).
+                }
+            },
         }
     }
 }
@@ -327,10 +384,14 @@ fn measure_post_row(
     post: &FeedViewPost,
     emoji: Option<&EmojiAtlas>,
 ) -> i32 {
-    let inner_w = SCREEN_WIDTH - 2 * ROW_PAD_X;
+    // Body text wraps to the column right of the avatar slot.
+    let inner_w = SCREEN_WIDTH - TEXT_LEFT - ROW_PAD_X;
     let body_text = extract_post_text(&post.post.record).unwrap_or_default();
     let body_h = frame.measure_text_wrapped_with_emoji(font, inner_w, 1.0, &body_text, emoji);
-    ROW_PAD_Y + TOP_LINE_H + body_h + BODY_GAP + FOOTER_H
+    let text_block_h = ROW_PAD_Y + TOP_LINE_H + body_h + BODY_GAP + FOOTER_H;
+    // Ensure the row is at least as tall as the avatar slot.
+    let avatar_block_h = ROW_PAD_Y + AVATAR_SIZE + FOOTER_H;
+    text_block_h.max(avatar_block_h)
 }
 
 /// Iterate through `posts`, advancing `y` by each post's cached height.
@@ -342,12 +403,14 @@ fn draw_post_list(
     row_heights: &[i32],
     scroll_y: f32,
     emoji: Option<&EmojiAtlas>,
+    cache: &TextureCache,
+    avatar_mask: Option<&Texture>,
 ) {
     let mut y = HEADER_H - scroll_y as i32;
     for (post, &row_h) in posts.iter().zip(row_heights.iter()) {
         let row_bottom = y + row_h;
         if row_bottom > VIEWPORT_TOP && y < SCREEN_HEIGHT {
-            draw_post_row(frame, font, post, y, row_h, emoji);
+            draw_post_row(frame, font, post, y, row_h, emoji, cache, avatar_mask);
         }
         y += row_h;
     }
@@ -362,11 +425,35 @@ fn draw_post_row(
     y_top: i32,
     row_h: i32,
     emoji: Option<&EmojiAtlas>,
+    cache: &TextureCache,
+    avatar_mask: Option<&Texture>,
 ) {
-    let row_left = 0;
     let row_right = SCREEN_WIDTH;
-    let inner_left = row_left + ROW_PAD_X;
-    let inner_w = row_right - row_left - 2 * ROW_PAD_X;
+    let inner_left = TEXT_LEFT;
+    let inner_w = row_right - inner_left - ROW_PAD_X;
+
+    // Avatar slot: 48×48 in the left margin, top-aligned with text top.
+    let avatar_x = ROW_PAD_X;
+    let avatar_y = y_top + ROW_PAD_Y;
+    let handle_str = post.post.author.handle.as_str();
+    let display_str = post
+        .post
+        .author
+        .display_name
+        .as_deref()
+        .filter(|s| !s.is_empty());
+    draw_avatar(
+        frame,
+        font,
+        post.post.author.avatar.as_deref(),
+        display_str,
+        handle_str,
+        avatar_x,
+        avatar_y,
+        AVATAR_SIZE,
+        cache,
+        avatar_mask,
+    );
 
     // Top line: display name (left) + @handle (right, muted).
     let display = post
@@ -375,11 +462,11 @@ fn draw_post_row(
         .display_name
         .as_deref()
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| post.post.author.handle.as_str());
+        .unwrap_or(handle_str);
     let top_y = y_top + ROW_PAD_Y;
     frame.draw_text(font, inner_left, top_y, theme::TEXT_PRIMARY, 1.0, display);
 
-    let handle = format!("@{}", post.post.author.handle.as_str());
+    let handle = format!("@{handle_str}");
     let (hw, _) = frame.measure_text(font, 0.85, &handle);
     let hx = row_right - ROW_PAD_X - hw;
     frame.draw_text(font, hx, top_y + 4, theme::TEXT_MUTED, 0.85, &handle);
@@ -422,4 +509,104 @@ fn draw_post_row(
 fn extract_post_text(record: &Unknown) -> Option<String> {
     use atrium_api::app::bsky::feed::post::RecordData;
     RecordData::try_from_unknown(record.clone()).ok().map(|r| r.text)
+}
+
+/// Render an avatar at `(x, y, size, size)`. Cache hit → scaled
+/// texture; cache miss (or no URL) → solid colored placeholder with the
+/// first character of the display name (or handle) centered. The
+/// optional `avatar_mask` is overlaid on top to fake circular avatars.
+fn draw_avatar(
+    frame: &mut Frame,
+    font: &Font,
+    url: Option<&str>,
+    display_name: Option<&str>,
+    handle: &str,
+    x: i32,
+    y: i32,
+    size: i32,
+    cache: &TextureCache,
+    avatar_mask: Option<&Texture>,
+) {
+    let mut painted_real = false;
+    if let Some(url) = url {
+        // Cache key matches the dispatch URL — both use the
+        // thumbnail-JPEG variant.
+        let url = avatar_thumbnail_jpeg(url);
+        if let Some(tex) = cache.get(&url) {
+            let sx = size as f32 / tex.width().max(1) as f32;
+            let sy = size as f32 / tex.height().max(1) as f32;
+            frame.draw_texture_scale(tex, x as f32, y as f32, sx, sy);
+            painted_real = true;
+        }
+    }
+    if !painted_real {
+        // Placeholder: colored square + initial letter.
+        frame.fill_rect(
+            x as f32,
+            y as f32,
+            size as f32,
+            size as f32,
+            placeholder_color(handle),
+        );
+        draw_avatar_initial(frame, font, display_name, handle, x, y, size);
+    }
+    // Mask: opaque-corners + transparent-disk overlay → circular look.
+    if let Some(mask) = avatar_mask {
+        let sx = size as f32 / mask.width().max(1) as f32;
+        let sy = size as f32 / mask.height().max(1) as f32;
+        frame.draw_texture_scale(mask, x as f32, y as f32, sx, sy);
+    }
+}
+
+/// Draw a single uppercase letter from `display_name` (or `handle` if
+/// no display name) centered inside the avatar slot. Used as the
+/// fallback avatar's "monogram" while the cache miss is in flight or
+/// the user has no avatar uploaded.
+fn draw_avatar_initial(
+    frame: &mut Frame,
+    font: &Font,
+    display_name: Option<&str>,
+    handle: &str,
+    x: i32,
+    y: i32,
+    size: i32,
+) {
+    let source = display_name.unwrap_or(handle);
+    let initial = source
+        .chars()
+        .next()
+        .unwrap_or('?')
+        .to_ascii_uppercase()
+        .to_string();
+    // Scale chosen so the letter takes up roughly half the avatar slot
+    // height (size 48 → ~24 px letter; size 96 → ~48 px). Anchored on
+    // base size 20 (Inter pixel size at scale 1.0).
+    let scale = (size as f32) / 40.0;
+    let (tw, th) = frame.measure_text(font, scale, &initial);
+    let tx = x + (size - tw) / 2;
+    // Approximate vertical centering: baseline at center + th/2 (since
+    // font measurement reports total height including descender).
+    let ty = y + (size + th) / 2 - 4;
+    frame.draw_text(font, tx, ty, theme::BACKGROUND, scale, &initial);
+}
+
+/// Pick a stable pastel color for an account based on its handle. 8-color
+/// palette; same handle always gets the same color.
+fn placeholder_color(handle: &str) -> Color {
+    const PALETTE: [Color; 8] = [
+        Color::rgb(0xF8, 0x9A, 0x9A), // pink
+        Color::rgb(0xF8, 0xC1, 0x9A), // peach
+        Color::rgb(0xF8, 0xE8, 0x9A), // yellow
+        Color::rgb(0x9A, 0xF8, 0xA0), // mint
+        Color::rgb(0x9A, 0xE0, 0xF8), // sky
+        Color::rgb(0x9A, 0xA0, 0xF8), // periwinkle
+        Color::rgb(0xC4, 0x9A, 0xF8), // lavender
+        Color::rgb(0xF8, 0x9A, 0xE0), // rose
+    ];
+    // Cheap FNV-like hash; sufficient for 8-bucket palette dispersion.
+    let mut h: u32 = 2166136261;
+    for b in handle.bytes() {
+        h = h.wrapping_mul(16777619) ^ b as u32;
+    }
+    PALETTE[(h as usize) % PALETTE.len()]
 }

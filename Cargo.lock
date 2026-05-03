@@ -236,7 +236,9 @@ name = "bsky-worker"
 version = "0.1.0"
 dependencies = [
  "atrium-api",
+ "atrium-xrpc",
  "bsky-auth",
+ "bsky-net",
  "crossbeam-channel",
  "futures",
 ]

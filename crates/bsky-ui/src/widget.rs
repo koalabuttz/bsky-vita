@@ -15,7 +15,7 @@
 //! without lifting does NOT fire a click.
 
 use bsky_input::{PadFrame, TouchPoint};
-use bsky_render::{theme, Color, EmojiAtlas, Font, Frame};
+use bsky_render::{theme, Color, EmojiAtlas, Font, Frame, Texture, TextureCache};
 use bsky_worker::Worker;
 
 /// Simple axis-aligned rectangle in display-pixel coordinates.
@@ -50,11 +50,24 @@ impl Rect {
 /// fallback (tofu) in that case. `Some` when the asset loaded
 /// successfully — pass to `Frame::draw_text_*_with_emoji` to render
 /// color emoji inline.
+///
+/// `texture_cache` is read-only access to the decoded-image LRU. Screens
+/// call `texture_cache.get(&url)` to render avatars / images on cache
+/// hit, and dispatch `WorkRequest::FetchImage { url }` via the worker
+/// on miss. Mutations (insert on response, evict on overflow) happen in
+/// `main.rs` after the worker drain.
 pub struct UiCtx<'a> {
     pub touches: &'a [TouchPoint],
     pub pad: &'a PadFrame,
     pub worker: Option<&'a Worker>,
     pub emoji: Option<&'a EmojiAtlas>,
+    pub texture_cache: &'a TextureCache,
+    /// Pre-baked 96×96 mask: opaque background-color in the four
+    /// corners, transparent disk in the center. Composited on top of
+    /// rendered avatars (texture or placeholder) to fake circular
+    /// avatars without GXM-direct shader work. `None` if the asset is
+    /// missing — avatars then render as squares.
+    pub avatar_mask: Option<&'a Texture>,
 }
 
 #[derive(Default)]

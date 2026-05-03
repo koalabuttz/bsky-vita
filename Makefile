@@ -2,21 +2,26 @@ APP_DIR := app
 TITLE_ID := BSKY00001
 VPK := target/armv7-sony-vita-newlibeabihf/release/bsky-vita.vpk
 
-.PHONY: build run install push-creds push-font push-emoji fetch-log test clean help
+.PHONY: build build-fast run run-fast install push-creds push-font push-emoji push-mask fetch-log test clean help
 
 help:
 	@echo "Targets:"
-	@echo "  build        Release VPK via cargo-vita"
+	@echo "  build        Release VPK via cargo-vita (opt-level=z + LTO; ~90 s rebuild)"
+	@echo "  build-fast   Dev VPK (opt-level=1, no LTO; ~20 s rebuild). Runtime is slower"
+	@echo "               but builds iterate ~5x faster — use for layout/network bring-up,"
+	@echo "               switch back to release for perf-sensitive testing."
 	@echo "  install      First-time only: upload VPK to ux0:/download/ — install via VitaShell"
-	@echo "  run          Fast iteration: rebuild + push eboot.bin + launch (app must be installed)"
+	@echo "  run          Release rebuild + push eboot.bin + launch (app must be installed)"
+	@echo "  run-fast     Same as run, but with dev profile (~5x faster build)"
 	@echo "  push-creds   Upload local credentials.toml to ux0:/data/$(TITLE_ID)/credentials.toml"
 	@echo "  push-font    Upload app/static/Inter-Regular.ttf to ux0:/app/$(TITLE_ID)/ (one-shot)"
 	@echo "  push-emoji   Upload app/static/twemoji.png to ux0:/app/$(TITLE_ID)/ (one-shot, ~2.5 MB)"
+	@echo "  push-mask    Upload app/static/avatar_mask_96.png to ux0:/app/$(TITLE_ID)/ (one-shot, ~500 B)"
 	@echo "  fetch-log    Pull ux0:data/$(TITLE_ID)/spike.log via vitacompanion FTP"
 	@echo "  test         Host-side library tests (excludes the Vita-target bin)"
 	@echo "  clean        Remove build artifacts"
 	@echo
-	@echo "Required env: VITA_IP=<vita.lan.ip> for install/run/push-*/fetch-log"
+	@echo "Required env: VITA_IP=<vita.lan.ip> for install/run*/push-*/fetch-log"
 	@echo
 	@echo "Big-asset workflow: 'make run' only updates eboot.bin (~5 MB). New or"
 	@echo "changed assets in app/static/ require an explicit push (push-font /"
@@ -24,6 +29,12 @@ help:
 
 build:
 	cd $(APP_DIR) && cargo vita build vpk -- --release
+
+# Dev-profile build: opt-level=1 (per workspace [profile.dev]), no LTO,
+# multiple codegen units. ~5x faster rebuild than release. Runtime is
+# slower but acceptable for layout / network iteration.
+build-fast:
+	cd $(APP_DIR) && cargo vita build vpk
 
 # First-time install: VPK lands at ux0:/download/, then install via VitaShell.
 # `--ftp-create-dirs` lets curl mkdir if the download dir doesn't exist yet.
@@ -39,6 +50,13 @@ install: build
 run: build
 	@if [ -z "$$VITA_IP" ]; then echo "VITA_IP env var not set"; exit 1; fi
 	cd $(APP_DIR) && cargo vita build vpk --update --run -- --release
+
+# Dev-profile run: ~5x faster build cycle. Use for iteration when build
+# time matters more than runtime. Switch back to `make run` for perf
+# checks or before committing.
+run-fast: build-fast
+	@if [ -z "$$VITA_IP" ]; then echo "VITA_IP env var not set"; exit 1; fi
+	cd $(APP_DIR) && cargo vita build vpk --update --run
 
 # Push local credentials.toml to the Vita. credentials.toml is gitignored;
 # copy credentials.toml.example to credentials.toml and fill in real values
@@ -90,6 +108,20 @@ push-emoji:
 		-T app/static/twemoji.png \
 		"ftp://$$VITA_IP:1337/ux0:/app/$(TITLE_ID)/twemoji.png"
 	@echo "twemoji.png pushed."
+
+# Push the circular avatar mask (~500 B). Composited on top of avatars
+# to fake circular rendering since vita2d has no clipping primitive.
+push-mask:
+	@if [ -z "$$VITA_IP" ]; then echo "VITA_IP env var not set"; exit 1; fi
+	@if [ ! -f app/static/avatar_mask_96.png ]; then \
+		echo "app/static/avatar_mask_96.png not found."; \
+		echo "Run 'python tools/build-avatar-mask.py' to generate it."; \
+		exit 1; \
+	fi
+	curl -sS --connect-timeout 5 --max-time 30 \
+		-T app/static/avatar_mask_96.png \
+		"ftp://$$VITA_IP:1337/ux0:/app/$(TITLE_ID)/avatar_mask_96.png"
+	@echo "avatar_mask_96.png pushed."
 
 # Library crates have no Vita-specific config and default to the host triple.
 # The bin crate (bsky-vita-app) is target-locked to Vita and excluded here.

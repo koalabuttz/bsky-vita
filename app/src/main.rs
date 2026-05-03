@@ -17,9 +17,9 @@
 //! *before* the worker exists.
 
 use bsky_input::{Pad, Touch};
-use bsky_render::{EmojiAtlas, Render};
+use bsky_render::{EmojiAtlas, Render, Texture, TextureCache};
 use bsky_ui::{LoginScreen, Screen, ScreenAction, UiCtx};
-use bsky_worker::Worker;
+use bsky_worker::{WorkResponse, Worker};
 
 fn main() {
     let mut render = match Render::init() {
@@ -64,6 +64,18 @@ fn main() {
         }
     };
 
+    // Phase 3.5: optional avatar circular-mask asset. ~500 bytes; fakes
+    // circular avatars by overlaying transparent-disk + opaque-corners
+    // on top of the rendered avatar. Missing → square avatars (still
+    // legible, just less polished).
+    let avatar_mask: Option<Texture> = match Texture::from_png_file("app0:avatar_mask_96.png") {
+        Ok(t) => Some(t),
+        Err(e) => {
+            eprintln!("avatar mask load failed ({e}); avatars will render as squares");
+            None
+        }
+    };
+
     let mut pad = Pad::init();
     let touch = Touch::init();
     let mut ime = bsky_ime::Ime::new();
@@ -77,6 +89,12 @@ fn main() {
     // in their `UiCtx`.
     let mut worker: Option<Worker> = None;
 
+    // Phase 3.5: LRU cache for decoded image textures (avatars; later,
+    // post embeds). 64 entries × ~37 KB worst case ≈ 2.4 MB GXM heap.
+    // Mutations happen here in main.rs after the worker drains; screens
+    // get a `&TextureCache` for read-only lookup.
+    let mut texture_cache = TextureCache::new(64);
+
     loop {
         let pf = pad.poll();
         let tf = touch.poll();
@@ -85,6 +103,8 @@ fn main() {
             pad: &pf,
             worker: worker.as_ref(),
             emoji: emoji_atlas.as_ref(),
+            texture_cache: &texture_cache,
+            avatar_mask: avatar_mask.as_ref(),
         };
 
         // Render + collect transition action. The Frame's Drop happens
@@ -105,8 +125,32 @@ fn main() {
         // Drain any worker responses produced since the last frame and
         // hand them to the active screen. Typically 0–1 per frame, but
         // we loop in case multiple complete simultaneously.
+        //
+        // For `Image` responses we decode the bytes into a `Texture` and
+        // insert into the cache here, BEFORE forwarding to the screen —
+        // so when `handle_worker_response` runs, the cache is already
+        // populated and the screen just needs to clear its in-flight set.
         if let Some(w) = worker.as_ref() {
             while let Some(resp) = w.try_recv() {
+                // For Image responses, decode + insert here. If decode
+                // fails, rewrite the response as Err so the screen knows
+                // the URL didn't actually become available — otherwise
+                // it'd think the fetch succeeded and would never re-try.
+                let resp = if let WorkResponse::Image {
+                    url,
+                    bytes: Ok(b),
+                } = &resp
+                {
+                    match texture_cache.insert(url.clone(), b) {
+                        Ok(()) => resp,
+                        Err(e) => WorkResponse::Image {
+                            url: url.clone(),
+                            bytes: Err(format!("decode: {e}")),
+                        },
+                    }
+                } else {
+                    resp
+                };
                 screen.handle_worker_response(resp);
             }
         }

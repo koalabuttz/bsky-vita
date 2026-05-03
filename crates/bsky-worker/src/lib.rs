@@ -41,7 +41,10 @@ use atrium_api::app::bsky::actor::get_profile;
 use atrium_api::app::bsky::feed::defs::FeedViewPost;
 use atrium_api::app::bsky::feed::get_timeline;
 use atrium_api::types::LimitedNonZeroU8;
+use atrium_xrpc::http::Request;
+use atrium_xrpc::HttpClient;
 use bsky_auth::AuthClient;
+use bsky_net::VitaHttpClient;
 use crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError};
 use futures::executor::block_on;
 
@@ -57,7 +60,11 @@ pub enum WorkRequest {
     /// previous `TimelineBatch`. End-of-feed is signalled by a response
     /// with `cursor: None`.
     FetchTimeline { cursor: Option<String> },
-    // Phase 3.5 will add: FetchImage { url: String }
+    /// Fetch an arbitrary image URL (avatars, embeds). No auth: uses a
+    /// fresh `VitaHttpClient` directly, bypassing the agent's session
+    /// machinery. The URL is echoed back in the response so the main
+    /// thread can dispatch the result to the right cache key.
+    FetchImage { url: String },
 }
 
 /// One page of timeline posts plus the cursor for the next page. `cursor:
@@ -72,6 +79,14 @@ pub struct TimelineBatch {
 pub enum WorkResponse {
     Profile(Result<Box<ProfileViewDetailedData>, String>),
     Timeline(Result<TimelineBatch, String>),
+    /// Raw bytes of the requested image. Caller decodes with
+    /// `bsky_render::Texture::from_image_bytes`. `url` echoes the
+    /// request URL so callers can route the result to the right cache
+    /// entry / clear the right "in-flight" tracker.
+    Image {
+        url: String,
+        bytes: Result<Vec<u8>, String>,
+    },
 }
 
 /// Handle to the worker thread. Holds the channel ends and the thread's
@@ -180,5 +195,30 @@ fn handle_request(client: &AuthClient, req: WorkRequest) -> WorkResponse {
                 Err(e) => WorkResponse::Timeline(Err(format!("{e}"))),
             }
         }
+        WorkRequest::FetchImage { url } => {
+            let bytes = fetch_image_bytes(&url);
+            WorkResponse::Image { url, bytes }
+        }
+    }
+}
+
+/// GET `url`, return the response body as bytes. Uses a fresh
+/// VitaHttpClient (no auth) — the CDN endpoints (cdn.bsky.app) don't
+/// require Bearer tokens and atrium's session-refresh path would only
+/// add overhead.
+fn fetch_image_bytes(url: &str) -> Result<Vec<u8>, String> {
+    let http = VitaHttpClient::new();
+    let req = match Request::builder()
+        .method("GET")
+        .uri(url)
+        .body(Vec::<u8>::new())
+    {
+        Ok(r) => r,
+        Err(e) => return Err(format!("invalid request URI: {e}")),
+    };
+    match block_on(http.send_http(req)) {
+        Ok(resp) if resp.status().is_success() => Ok(resp.into_body()),
+        Ok(resp) => Err(format!("HTTP {}", resp.status().as_u16())),
+        Err(e) => Err(format!("{e}")),
     }
 }

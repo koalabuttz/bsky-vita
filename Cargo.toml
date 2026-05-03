@@ -56,3 +56,9 @@ debug = true  # DWARF in ELF for addr2line; cargo-vita strips from VPK
 # Plain dev (-O0) is too slow to be useful on Vita's Cortex-A9.
 # Bumping to -O1 keeps debuggability while staying tolerable.
 opt-level = 1
+# debug = false drops the per-line debug info (~80 MB → ~20 MB Vita
+# eboot). NOTE: do NOT also set `strip = "symbols"` here — that emits
+# `-Wl,--strip-all` which removes the relocation symbols vita-elf-create
+# needs. arm-vita-eabi-strip --strip-unneeded is the right post-link
+# step (already done by cargo-vita's release pipeline).
+debug = false

@@ -1,5 +1,6 @@
 //! Immediate-mode UI for bsky-vita.
 
+pub mod cdn;
 pub mod login;
 pub mod profile;
 pub mod screen;

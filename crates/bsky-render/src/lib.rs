@@ -42,6 +42,7 @@ use core::ffi::c_uint;
 use core::marker::PhantomData;
 #[cfg(target_os = "vita")]
 use core::ptr::NonNull;
+use std::collections::{HashMap, VecDeque};
 #[cfg(target_os = "vita")]
 use std::ffi::CString;
 
@@ -438,6 +439,92 @@ impl EmojiAtlas {
     /// Underlying texture (for direct draw via `Frame::draw_texture_part_scale`).
     pub fn texture(&self) -> &Texture {
         &self.texture
+    }
+}
+
+/// LRU cache of decoded image textures, keyed by source URL.
+///
+/// Owned by `main.rs`; passed to screens via `UiCtx::texture_cache` for
+/// read-only lookup. Mutations (insert on response, eviction on
+/// overflow) happen in the main loop after the worker drain — screens
+/// don't mutate.
+///
+/// Capacity is in entries, not bytes. Each entry is one decoded
+/// `Texture` (~37 KB at 96×96 RGBA, ~9 KB at 48×48 RGBA). Default 64
+/// entries fits roughly 2.4 MB worst case; comfortably under the GXM
+/// heap budget.
+///
+/// Eviction policy: simple LRU. `insert` pushes to the back; `touch`
+/// promotes a hit to the back; on overflow, the front entry's
+/// `Texture` is dropped (frees the GPU memory via `vita2d_free_texture`).
+pub struct TextureCache {
+    map: HashMap<String, Texture>,
+    /// Insertion / access order. Front = oldest, back = newest.
+    order: VecDeque<String>,
+    capacity: usize,
+}
+
+impl TextureCache {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            map: HashMap::with_capacity(capacity),
+            order: VecDeque::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    pub fn contains(&self, url: &str) -> bool {
+        self.map.contains_key(url)
+    }
+
+    pub fn get(&self, url: &str) -> Option<&Texture> {
+        self.map.get(url)
+    }
+
+    /// Promote `url` to the most-recently-used position. Call from
+    /// per-frame render code that observes a cache hit, so frequently
+    /// drawn textures don't get evicted.
+    pub fn touch(&mut self, url: &str) {
+        if !self.map.contains_key(url) {
+            return;
+        }
+        // Find and remove from current position.
+        if let Some(pos) = self.order.iter().position(|u| u == url) {
+            let s = self.order.remove(pos).expect("position is valid");
+            self.order.push_back(s);
+        }
+    }
+
+    /// Decode `bytes` (PNG or JPEG, auto-detected) and insert. If the
+    /// URL already exists, replaces the entry (re-decoded). Evicts the
+    /// oldest entry on overflow.
+    pub fn insert(&mut self, url: String, bytes: &[u8]) -> Result<(), RenderError> {
+        let texture = Texture::from_image_bytes(bytes)?;
+        // If updating existing, drop the old entry's slot in order.
+        if self.map.contains_key(&url) {
+            if let Some(pos) = self.order.iter().position(|u| u == &url) {
+                self.order.remove(pos);
+            }
+        } else if self.map.len() >= self.capacity {
+            // At capacity — evict the LRU entry first. Drop the texture
+            // explicitly via remove from the map (which calls Drop ->
+            // vita2d_free_texture).
+            if let Some(victim) = self.order.pop_front() {
+                self.map.remove(&victim);
+            }
+        }
+        self.map.insert(url.clone(), texture);
+        self.order.push_back(url);
+        Ok(())
+    }
+
+    /// Number of entries currently cached.
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
     }
 }
 
