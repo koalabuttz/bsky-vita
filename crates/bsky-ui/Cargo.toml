@@ -9,3 +9,6 @@ description = "Immediate-mode widget tree + screens (Login, Profile, ...) — Vi
 bsky-render = { path = "../bsky-render" }
 bsky-input  = { path = "../bsky-input" }
 bsky-ime    = { path = "../bsky-ime" }
+bsky-auth   = { path = "../bsky-auth" }
+atrium-api  = { workspace = true }
+futures     = { workspace = true }

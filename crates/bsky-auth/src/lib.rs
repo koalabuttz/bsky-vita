@@ -22,11 +22,13 @@
 //! `tokio::sync::Mutex`/`Notify` primitives that atrium uses internally are
 //! runtime-agnostic.
 
+pub mod client;
 pub mod credentials;
 pub mod resolver;
 pub mod store;
 pub mod xrpc;
 
+pub use client::{login_with_password, try_resume_existing_session, AuthClient};
 pub use credentials::{load_credentials, Credentials};
 pub use resolver::{resolve_pds, ResolvedIdentity};
 pub use store::{FileSessionStore, SessionStoreError};

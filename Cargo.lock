@@ -203,9 +203,12 @@ version = "0.1.0"
 name = "bsky-ui"
 version = "0.1.0"
 dependencies = [
+ "atrium-api",
+ "bsky-auth",
  "bsky-ime",
  "bsky-input",
  "bsky-render",
+ "futures",
 ]
 
 [[package]]

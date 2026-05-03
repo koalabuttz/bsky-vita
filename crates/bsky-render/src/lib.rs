@@ -244,7 +244,9 @@ impl Drop for Render {
 /// captured by an unseen keyboard.
 pub struct Frame<'r> {
     /// Have we already called `vita2d_end_drawing` (via `pump_ime`)?
-    /// Drop checks this to avoid a double-end.
+    /// Drop checks this to avoid a double-end. Only used on the Vita
+    /// target; host stub Frames don't actually render.
+    #[cfg_attr(not(target_os = "vita"), allow(dead_code))]
     ended: bool,
     _render: PhantomData<&'r mut Render>,
 }
