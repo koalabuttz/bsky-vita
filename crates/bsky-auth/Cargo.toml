@@ -3,4 +3,18 @@ name = "bsky-auth"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Session storage, JWT decode, app-password createSession + refresh rotation"
+description = "Identity resolution + app-password createSession + refresh rotation"
+
+[dependencies]
+bsky-net        = { path = "../bsky-net" }
+atrium-api      = { workspace = true }
+atrium-xrpc     = { workspace = true }
+atrium-identity = { workspace = true }
+atrium-common   = "0.1"
+futures         = { workspace = true }
+serde           = { workspace = true }
+serde_json      = { workspace = true }
+toml            = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
