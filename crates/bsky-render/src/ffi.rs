@@ -87,4 +87,26 @@ unsafe extern "C" {
         width: *mut c_int,
         height: *mut c_int,
     );
+
+    // FreeType-backed TrueType / OpenType font (Phase 3.3). Same
+    // call-shape as PGF except `size` is unsigned pixel size (not float
+    // scale), and the loader takes a path or memory blob instead of
+    // pulling a built-in system font.
+    pub fn vita2d_load_font_file(filename: *const c_char) -> *mut vita2d_font;
+    pub fn vita2d_free_font(font: *mut vita2d_font);
+    pub fn vita2d_font_draw_text(
+        font: *mut vita2d_font,
+        x: c_int,
+        y: c_int,
+        color: c_uint,
+        size: c_uint,
+        text: *const c_char,
+    ) -> c_int;
+    pub fn vita2d_font_text_dimensions(
+        font: *mut vita2d_font,
+        size: c_uint,
+        text: *const c_char,
+        width: *mut c_int,
+        height: *mut c_int,
+    );
 }

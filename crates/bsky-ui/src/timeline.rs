@@ -49,7 +49,10 @@ const VIEWPORT_H: i32 = SCREEN_HEIGHT - HEADER_H;
 /// Side margins inside a post row.
 const ROW_PAD_X: i32 = 16;
 /// Vertical padding inside a row (above display name, below counts).
-const ROW_PAD_Y: i32 = 12;
+/// 20 px clears the ascender of 20 px text (ascender ~15–16 px above
+/// baseline), preventing letter tops from overlapping the previous
+/// row's separator. Was 12 in the PGF era.
+const ROW_PAD_Y: i32 = 20;
 /// Gap between display-name row and post body.
 const TOP_LINE_H: i32 = 24;
 /// Gap between post body and counts row.

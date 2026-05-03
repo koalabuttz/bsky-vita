@@ -27,6 +27,14 @@ fn main() {
             // Our 2D layer (defines sceGxm* / sceDisplay* references):
             "vita2d",
             "vita2d_ext",
+            // FreeType (Phase 3.3) — vita2d's font_* APIs call into it.
+            // png/z/bz2 are FreeType's transitive deps for PNG-in-OTF
+            // glyphs (uncommon but vitasdk's libfreetype.a is built with
+            // them enabled, so symbols are referenced).
+            "freetype",
+            "png",
+            "z",
+            "bz2",
             // Sony module stubs vita2d/vita2d_ext reference. Listed in
             // dependency order: graphics first, then PGF/PVF for the
             // system font loaders, then kernel/sysmem/app-mgr basics.

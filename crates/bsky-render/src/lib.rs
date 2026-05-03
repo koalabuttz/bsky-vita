@@ -33,6 +33,8 @@
 #[cfg(target_os = "vita")]
 mod ffi;
 
+#[cfg(target_os = "vita")]
+use core::ffi::c_uint;
 use core::marker::PhantomData;
 #[cfg(target_os = "vita")]
 use core::ptr::NonNull;
@@ -89,6 +91,9 @@ pub enum RenderError {
     Init(i32),
     /// `vita2d_load_*_pgf` returned a null pointer.
     PgfLoad,
+    /// `vita2d_load_font_file` returned a null pointer (asset missing,
+    /// corrupt, or FreeType failed to parse).
+    TtfLoad,
     /// Method was called on a non-Vita target where rendering is unavailable.
     NotOnVita,
 }
@@ -98,9 +103,30 @@ impl core::fmt::Display for RenderError {
         match self {
             RenderError::Init(code) => write!(f, "vita2d_init failed: {code}"),
             RenderError::PgfLoad => write!(f, "vita2d_load_default_pgf returned null"),
+            RenderError::TtfLoad => write!(f, "vita2d_load_font_file returned null"),
             RenderError::NotOnVita => write!(f, "render is only supported on the Vita target"),
         }
     }
+}
+
+/// Pixel size that `scale = 1.0` maps to when rendering with TTF fonts.
+/// 20 was tuned on hardware to compensate for the Vita's lower DPI vs a
+/// modern phone — Bluesky's mobile app uses ~15–16 px body text at 400+
+/// DPI; on the Vita's ~220 DPI we need ~20 px to give each glyph enough
+/// rasterized pixels per stroke for clean antialiasing. PGF rendering
+/// ignores this — it uses the float `scale` directly because PGF is a
+/// bitmap font with its own native size.
+#[cfg(target_os = "vita")]
+const BASE_SIZE_PX: u32 = 20;
+
+/// Convert the `scale: f32` carried through the bsky-render API into the
+/// `unsigned int size` that `vita2d_font_*` expects. Clamps to ≥ 1 so a
+/// near-zero scale doesn't render at size 0 (which vita2d treats as
+/// "draw nothing").
+#[cfg(target_os = "vita")]
+#[inline]
+fn scale_to_px(scale: f32) -> c_uint {
+    (scale * BASE_SIZE_PX as f32).round().max(1.0) as c_uint
 }
 
 impl core::error::Error for RenderError {}
@@ -185,7 +211,7 @@ impl Render {
         {
             let p = unsafe { ffi::vita2d_load_default_pgf() };
             match NonNull::new(p) {
-                Some(ptr) => Ok(Font { ptr }),
+                Some(ptr) => Ok(Font::Pgf(ptr)),
                 None => Err(RenderError::PgfLoad),
             }
         }
@@ -194,21 +220,69 @@ impl Render {
             Err(RenderError::NotOnVita)
         }
     }
+
+    /// Load a TrueType / OpenType font from a Vita filesystem path
+    /// (typically `app0:Inter-Regular.ttf` for a bundled VPK asset).
+    /// Backed by FreeType inside vita2d. Phase 3.3+ default; PGF stays
+    /// available via [`Render::load_default_pgf`] as a fallback if the
+    /// asset is missing or corrupt.
+    ///
+    /// The returned [`Font`] uses the same `scale: f32` API as PGF — the
+    /// scale is multiplied by [`BASE_SIZE_PX`] internally to derive the
+    /// pixel size FreeType needs.
+    pub fn load_inter_ttf(&self, path: &str) -> Result<Font, RenderError> {
+        #[cfg(target_os = "vita")]
+        {
+            // vita2d's `vita2d_load_font_file` crashes (instead of
+            // returning NULL) when the file is missing — confirmed on
+            // hardware. Pre-check existence via std::fs so the fallback
+            // path stays safe.
+            if std::fs::metadata(path).is_err() {
+                return Err(RenderError::TtfLoad);
+            }
+            let cstr = CString::new(path).map_err(|_| RenderError::TtfLoad)?;
+            let p = unsafe { ffi::vita2d_load_font_file(cstr.as_ptr()) };
+            match NonNull::new(p) {
+                Some(ptr) => Ok(Font::Ttf(ptr)),
+                None => Err(RenderError::TtfLoad),
+            }
+        }
+        #[cfg(not(target_os = "vita"))]
+        {
+            let _ = path;
+            Err(RenderError::NotOnVita)
+        }
+    }
 }
 
-/// A loaded font handle. Single-threaded; freed via `vita2d_free_pgf` on Drop.
-pub struct Font {
+/// A loaded font handle. Single-threaded; freed via the matching
+/// `vita2d_free_*` on Drop. Two backends:
+///
+/// - [`Font::Pgf`] — Sony's bitmap font. Renders at fixed sizes; the
+///   `scale` parameter is a float multiplier on PGF's native size.
+///   Always available without bundled assets. Used as the fallback when
+///   the TTF asset is missing.
+/// - [`Font::Ttf`] — FreeType-rendered TrueType / OpenType. The `scale`
+///   parameter is multiplied by [`BASE_SIZE_PX`] inside the wrapper to
+///   produce the pixel size FreeType needs. Higher quality, supports
+///   any size cleanly, but requires a bundled font asset.
+pub enum Font {
     #[cfg(target_os = "vita")]
-    ptr: NonNull<ffi::vita2d_pgf>,
+    Pgf(NonNull<ffi::vita2d_pgf>),
+    #[cfg(target_os = "vita")]
+    Ttf(NonNull<ffi::vita2d_font>),
     #[cfg(not(target_os = "vita"))]
-    _private: PhantomData<*const ()>,
+    Stub(PhantomData<*const ()>),
 }
 
 impl Drop for Font {
     fn drop(&mut self) {
         #[cfg(target_os = "vita")]
         unsafe {
-            ffi::vita2d_free_pgf(self.ptr.as_ptr());
+            match self {
+                Font::Pgf(p) => ffi::vita2d_free_pgf(p.as_ptr()),
+                Font::Ttf(p) => ffi::vita2d_free_font(p.as_ptr()),
+            }
         }
     }
 }
@@ -298,15 +372,27 @@ impl<'r> Frame<'r> {
                 Ok(s) => s,
                 Err(_) => return x,
             };
-            unsafe {
-                ffi::vita2d_pgf_draw_text(
-                    font.ptr.as_ptr(),
-                    x,
-                    y,
-                    color.raw(),
-                    scale,
-                    cstr.as_ptr(),
-                )
+            match font {
+                Font::Pgf(p) => unsafe {
+                    ffi::vita2d_pgf_draw_text(
+                        p.as_ptr(),
+                        x,
+                        y,
+                        color.raw(),
+                        scale,
+                        cstr.as_ptr(),
+                    )
+                },
+                Font::Ttf(p) => unsafe {
+                    ffi::vita2d_font_draw_text(
+                        p.as_ptr(),
+                        x,
+                        y,
+                        color.raw(),
+                        scale_to_px(scale),
+                        cstr.as_ptr(),
+                    )
+                },
             }
         }
         #[cfg(not(target_os = "vita"))]
@@ -327,14 +413,25 @@ impl<'r> Frame<'r> {
             };
             let mut w: i32 = 0;
             let mut h: i32 = 0;
-            unsafe {
-                ffi::vita2d_pgf_text_dimensions(
-                    font.ptr.as_ptr(),
-                    scale,
-                    cstr.as_ptr(),
-                    &mut w,
-                    &mut h,
-                );
+            match font {
+                Font::Pgf(p) => unsafe {
+                    ffi::vita2d_pgf_text_dimensions(
+                        p.as_ptr(),
+                        scale,
+                        cstr.as_ptr(),
+                        &mut w,
+                        &mut h,
+                    );
+                },
+                Font::Ttf(p) => unsafe {
+                    ffi::vita2d_font_text_dimensions(
+                        p.as_ptr(),
+                        scale_to_px(scale),
+                        cstr.as_ptr(),
+                        &mut w,
+                        &mut h,
+                    );
+                },
             }
             (w, h)
         }

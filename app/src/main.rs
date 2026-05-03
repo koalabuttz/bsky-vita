@@ -32,9 +32,22 @@ fn main() {
         }
     };
     render.set_clear_color(bsky_render::theme::BACKGROUND);
-    let font = render
-        .load_default_pgf()
-        .expect("load default PGF font");
+    // Phase 3.3: try Inter (TTF, FreeType) first; fall back to PGF if the
+    // bundled asset is missing or vita2d's font loader rejects it. PGF
+    // rendering still works and produces the pre-3.3 visual; the user
+    // sees a log line explaining the fallback.
+    let font = match render.load_inter_ttf("app0:Inter-Regular.ttf") {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!(
+                "Inter TTF load failed ({e}); falling back to PGF — \
+                 add app/static/Inter-Regular.ttf and rebuild for crisp text"
+            );
+            render
+                .load_default_pgf()
+                .expect("PGF fallback also failed; can't render text")
+        }
+    };
 
     let mut pad = Pad::init();
     let touch = Touch::init();
