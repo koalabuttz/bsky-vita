@@ -20,7 +20,8 @@ use bsky_render::{theme, Font, Frame, SCREEN_HEIGHT, SCREEN_WIDTH};
 use bsky_worker::{WorkRequest, WorkResponse};
 
 use crate::screen::{Screen, ScreenAction};
-use crate::widget::UiCtx;
+use crate::timeline::TimelineScreen;
+use crate::widget::{button, ButtonState, Rect, UiCtx};
 
 enum ProfileState {
     /// Initial state — waiting on the worker to return getProfile.
@@ -38,6 +39,7 @@ pub struct ProfileScreen {
     /// session. Without this we'd re-dispatch every frame while the
     /// response is in flight.
     dispatched: bool,
+    timeline_btn: ButtonState,
 }
 
 impl ProfileScreen {
@@ -46,6 +48,7 @@ impl ProfileScreen {
             client,
             state: ProfileState::Pending,
             dispatched: false,
+            timeline_btn: ButtonState::default(),
         }
     }
 }
@@ -73,6 +76,7 @@ impl Screen for ProfileScreen {
         // Title bar (consistent with LoginScreen).
         frame.draw_text_centered(font, 40, theme::TEXT_PRIMARY, 1.6, "bsky-vita");
 
+        let mut timeline_clicked = false;
         match &self.state {
             ProfileState::Pending => {
                 frame.draw_text_centered(
@@ -85,6 +89,22 @@ impl Screen for ProfileScreen {
             }
             ProfileState::Loaded(p) => {
                 draw_profile(frame, font, p);
+                let btn_w = 160.0;
+                let btn_rect = Rect::new(
+                    (SCREEN_WIDTH as f32 - btn_w) / 2.0,
+                    350.0,
+                    btn_w,
+                    48.0,
+                );
+                timeline_clicked = button(
+                    frame,
+                    font,
+                    btn_rect,
+                    "Timeline",
+                    &mut self.timeline_btn,
+                    ctx,
+                    true,
+                );
                 draw_session_footer(frame, font, &self.client);
             }
             ProfileState::Error(msg) => {
@@ -105,6 +125,12 @@ impl Screen for ProfileScreen {
             }
         }
 
+        if timeline_clicked {
+            return ScreenAction::Goto(Box::new(TimelineScreen::new(Arc::clone(
+                &self.client,
+            ))));
+        }
+
         ScreenAction::None
     }
 
@@ -112,6 +138,9 @@ impl Screen for ProfileScreen {
         match resp {
             WorkResponse::Profile(Ok(p)) => self.state = ProfileState::Loaded(p),
             WorkResponse::Profile(Err(e)) => self.state = ProfileState::Error(e),
+            // Timeline responses can arrive after the user navigated back
+            // from TimelineScreen mid-fetch. Drop them.
+            WorkResponse::Timeline(_) => {}
         }
     }
 }

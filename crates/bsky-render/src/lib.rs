@@ -362,6 +362,137 @@ impl<'r> Frame<'r> {
         (x, y, w, h)
     }
 
+    /// Word-wrap `text` to fit within `max_w` pixels at `scale`, drawing
+    /// each line at increasing y-offsets from `y`. Returns the total
+    /// drawn height (`n_lines * line_h`); pass to layout code to advance
+    /// the cursor past the wrapped block.
+    ///
+    /// Wrap policy: split on whitespace; words that exceed `max_w` are
+    /// hard-broken on `char` boundaries (no shaping or hyphenation).
+    /// Embedded `\n` characters force a paragraph break. Empty input
+    /// returns 0 without drawing.
+    ///
+    /// Performance: the implementation calls `measure_text` once per
+    /// candidate line plus once per oversized-word character. For 3.2's
+    /// timeline post bodies (~5 visible posts × 50ish chars) this is a
+    /// few hundred FFI calls per frame — comfortably below 60fps budget
+    /// on Cortex-A9. Use [`Frame::measure_text_wrapped`] to compute
+    /// heights in advance (e.g. for layout culling) without paying the
+    /// glyph rasterization cost.
+    pub fn draw_text_wrapped(
+        &mut self,
+        font: &Font,
+        x: i32,
+        y: i32,
+        max_w: i32,
+        color: Color,
+        scale: f32,
+        text: &str,
+    ) -> i32 {
+        if text.is_empty() {
+            return 0;
+        }
+        let (_, ref_h) = self.measure_text(font, scale, "Hg");
+        let line_h = ref_h + 4;
+        let mut y_cursor = y;
+        for paragraph in text.split('\n') {
+            let mut current = String::new();
+            for word in paragraph.split_whitespace() {
+                let candidate = if current.is_empty() {
+                    word.to_string()
+                } else {
+                    format!("{current} {word}")
+                };
+                if self.measure_text(font, scale, &candidate).0 <= max_w {
+                    current = candidate;
+                    continue;
+                }
+                if !current.is_empty() {
+                    self.draw_text(font, x, y_cursor, color, scale, &current);
+                    y_cursor += line_h;
+                    current.clear();
+                }
+                if self.measure_text(font, scale, word).0 <= max_w {
+                    current = word.to_string();
+                } else {
+                    for ch in word.chars() {
+                        let trial = format!("{current}{ch}");
+                        if self.measure_text(font, scale, &trial).0 > max_w
+                            && !current.is_empty()
+                        {
+                            self.draw_text(font, x, y_cursor, color, scale, &current);
+                            y_cursor += line_h;
+                            current.clear();
+                        }
+                        current.push(ch);
+                    }
+                }
+            }
+            if !current.is_empty() {
+                self.draw_text(font, x, y_cursor, color, scale, &current);
+                y_cursor += line_h;
+            }
+        }
+        y_cursor - y
+    }
+
+    /// Measure how tall `text` would be when word-wrapped to `max_w`
+    /// pixels at `scale`, without drawing anything. Returns the height
+    /// `draw_text_wrapped` would advance by. Useful for pre-layout
+    /// culling (e.g. computing post-row heights before deciding which
+    /// rows are visible). Mirrors `draw_text_wrapped`'s wrap policy
+    /// exactly; if you change one, change both.
+    pub fn measure_text_wrapped(
+        &self,
+        font: &Font,
+        max_w: i32,
+        scale: f32,
+        text: &str,
+    ) -> i32 {
+        if text.is_empty() {
+            return 0;
+        }
+        let (_, ref_h) = self.measure_text(font, scale, "Hg");
+        let line_h = ref_h + 4;
+        let mut y_cursor = 0;
+        for paragraph in text.split('\n') {
+            let mut current = String::new();
+            for word in paragraph.split_whitespace() {
+                let candidate = if current.is_empty() {
+                    word.to_string()
+                } else {
+                    format!("{current} {word}")
+                };
+                if self.measure_text(font, scale, &candidate).0 <= max_w {
+                    current = candidate;
+                    continue;
+                }
+                if !current.is_empty() {
+                    y_cursor += line_h;
+                    current.clear();
+                }
+                if self.measure_text(font, scale, word).0 <= max_w {
+                    current = word.to_string();
+                } else {
+                    for ch in word.chars() {
+                        let trial = format!("{current}{ch}");
+                        if self.measure_text(font, scale, &trial).0 > max_w
+                            && !current.is_empty()
+                        {
+                            y_cursor += line_h;
+                            current.clear();
+                        }
+                        current.push(ch);
+                    }
+                }
+            }
+            if !current.is_empty() {
+                y_cursor += line_h;
+            }
+        }
+        y_cursor
+    }
+
     /// Drive a modal common dialog (e.g. sceImeDialog) for one frame.
     ///
     /// This ends the GXM scene first (so any draws above are committed),

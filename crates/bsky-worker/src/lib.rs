@@ -38,6 +38,9 @@ use std::thread::{self, JoinHandle};
 
 use atrium_api::app::bsky::actor::defs::ProfileViewDetailedData;
 use atrium_api::app::bsky::actor::get_profile;
+use atrium_api::app::bsky::feed::defs::FeedViewPost;
+use atrium_api::app::bsky::feed::get_timeline;
+use atrium_api::types::LimitedNonZeroU8;
 use bsky_auth::AuthClient;
 use crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError};
 use futures::executor::block_on;
@@ -49,14 +52,26 @@ pub enum WorkRequest {
     /// Fetch the logged-in user's own profile. The DID is resolved from
     /// the session inside the worker — callers don't need to know it.
     GetOwnProfile,
-    // Phase 3.2 will add: FetchTimeline { cursor: Option<String> }
+    /// Fetch a page of the home (Following) timeline. `cursor: None` for
+    /// the first page; subsequent pages pass the cursor returned in the
+    /// previous `TimelineBatch`. End-of-feed is signalled by a response
+    /// with `cursor: None`.
+    FetchTimeline { cursor: Option<String> },
     // Phase 3.5 will add: FetchImage { url: String }
+}
+
+/// One page of timeline posts plus the cursor for the next page. `cursor:
+/// None` means we've reached the end of the feed.
+pub struct TimelineBatch {
+    pub posts: Vec<FeedViewPost>,
+    pub cursor: Option<String>,
 }
 
 /// A completed work item. Each variant's payload mirrors the request that
 /// produced it, with a `Result` because every PDS call can fail.
 pub enum WorkResponse {
     Profile(Result<Box<ProfileViewDetailedData>, String>),
+    Timeline(Result<TimelineBatch, String>),
 }
 
 /// Handle to the worker thread. Holds the channel ends and the thread's
@@ -144,6 +159,25 @@ fn handle_request(client: &AuthClient, req: WorkRequest) -> WorkResponse {
             match result {
                 Ok(p) => WorkResponse::Profile(Ok(Box::new(p.data))),
                 Err(e) => WorkResponse::Profile(Err(format!("{e}"))),
+            }
+        }
+        WorkRequest::FetchTimeline { cursor } => {
+            // Page size 50: covers ~10 screens of posts on a Vita display
+            // and is well under atrium's cap of 100.
+            let limit = LimitedNonZeroU8::<100>::try_from(50)
+                .expect("50 fits in LimitedNonZeroU8<100>");
+            let params = get_timeline::ParametersData {
+                cursor,
+                limit: Some(limit),
+                algorithm: None,
+            }
+            .into();
+            match block_on(client.agent.api.app.bsky.feed.get_timeline(params)) {
+                Ok(o) => WorkResponse::Timeline(Ok(TimelineBatch {
+                    posts: o.data.feed,
+                    cursor: o.data.cursor,
+                })),
+                Err(e) => WorkResponse::Timeline(Err(format!("{e}"))),
             }
         }
     }
