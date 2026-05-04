@@ -262,9 +262,11 @@ impl Screen for ProfileScreen {
         match resp {
             WorkResponse::Profile(Ok(p)) => self.state = ProfileState::Loaded(p),
             WorkResponse::Profile(Err(e)) => self.state = ProfileState::Error(e),
-            // Timeline responses can arrive after the user navigated back
+            // Feed-page responses can arrive after the user navigated back
             // from TimelineScreen mid-fetch. Drop them.
-            WorkResponse::Timeline(_) => {}
+            WorkResponse::FeedPage { .. } => {}
+            // Saved-feeds responses belong to TimelineScreen.
+            WorkResponse::SavedFeeds(_) => {}
             // Image responses: cache is updated in main.rs; we just clear
             // our in-flight tracker so a future cache-miss can re-dispatch.
             WorkResponse::Image { url, .. } => {

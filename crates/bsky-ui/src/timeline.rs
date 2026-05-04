@@ -35,7 +35,7 @@ use bsky_input::buttons;
 use bsky_render::{
     theme, Color, EmojiAtlas, Font, Frame, Texture, TextureCache, SCREEN_HEIGHT, SCREEN_WIDTH,
 };
-use bsky_worker::{ReplyTarget, WorkRequest, WorkResponse};
+use bsky_worker::{FeedSource, ReplyTarget, SavedFeedPin, WorkRequest, WorkResponse};
 
 use crate::cdn::avatar_thumbnail_jpeg;
 use crate::compose::ComposeScreen;
@@ -43,15 +43,19 @@ use crate::profile::ProfileScreen;
 use crate::screen::{Screen, ScreenAction};
 use crate::tabbar::{TabBar, TopLevel, TAB_BAR_HEIGHT};
 use crate::thread::ThreadScreen;
-use crate::widget::{Rect, UiCtx};
+use crate::widget::{ButtonState, Rect, UiCtx};
 
 /// Sticky header height (px). Posts render below this; the header is
 /// drawn last so it covers any content that's scrolled into its zone.
 const HEADER_H: i32 = 40;
 
-/// Viewport for the post list — between the sticky header at the top
-/// and the tab bar at the bottom.
-const VIEWPORT_TOP: i32 = HEADER_H;
+/// Pill row height — Phase 5.1 horizontal feed picker between the
+/// sticky header and the post list.
+const PILL_ROW_H: i32 = 50;
+
+/// Viewport for the post list — between the pill row at the top and
+/// the tab bar at the bottom.
+const VIEWPORT_TOP: i32 = HEADER_H + PILL_ROW_H;
 const VIEWPORT_BOTTOM: i32 = SCREEN_HEIGHT - TAB_BAR_HEIGHT;
 const VIEWPORT_H: i32 = VIEWPORT_BOTTOM - VIEWPORT_TOP;
 
@@ -104,10 +108,27 @@ enum TimelineState {
 pub struct TimelineScreen {
     client: Arc<AuthClient>,
     state: TimelineState,
+    /// Which feed is currently displayed. Initial value is
+    /// `FeedSource::Following`; changed when the user taps a pill.
+    /// Worker responses (`FeedPage { source, .. }`) are dropped if
+    /// `source != current_source` (stale fetch).
+    current_source: FeedSource,
+    /// Pinned saved feeds, populated by the one-shot
+    /// `FetchSavedFeeds`. Always begins with a `Following` pin
+    /// (synthesized by the worker if absent from prefs). Empty until
+    /// the response lands; the pill row renders nothing in that
+    /// interval.
+    saved_feeds: Vec<SavedFeedPin>,
+    /// Hit-test state per pill, parallel to `saved_feeds`.
+    pill_buttons: Vec<ButtonState>,
+    /// Have we dispatched the one-shot `FetchSavedFeeds`?
+    saved_feeds_dispatched: bool,
     /// Scroll offset in pixels from the top of the post list (0 = first
-    /// post at y=HEADER_H).
+    /// post at y=VIEWPORT_TOP).
     scroll_y: f32,
-    /// Have we sent the initial FetchTimeline yet?
+    /// Have we sent the initial `FetchFeed` for `current_source`?
+    /// Reset to `false` when the user switches feeds so the next frame
+    /// re-dispatches.
     dispatched: bool,
     /// A pagination request is in flight; suppress further dispatches.
     fetching_more: bool,
@@ -132,6 +153,10 @@ impl TimelineScreen {
         Self {
             client,
             state: TimelineState::Loading,
+            current_source: FeedSource::Following,
+            saved_feeds: Vec::new(),
+            pill_buttons: Vec::new(),
+            saved_feeds_dispatched: false,
             scroll_y: 0.0,
             dispatched: false,
             fetching_more: false,
@@ -140,6 +165,32 @@ impl TimelineScreen {
             selected_idx: 0,
             tab_bar: TabBar::new(TopLevel::Home),
         }
+    }
+
+    /// Switch to a new feed source. Resets paging state so the next
+    /// frame re-dispatches the initial page.
+    fn switch_to(&mut self, source: FeedSource) {
+        if source == self.current_source {
+            return;
+        }
+        self.current_source = source;
+        self.state = TimelineState::Loading;
+        self.dispatched = false;
+        self.fetching_more = false;
+        self.row_heights.clear();
+        self.scroll_y = 0.0;
+        self.selected_idx = 0;
+    }
+
+    /// Display name to render in the sticky header — the active pin's
+    /// `display_name`, falling back to "Following" before saved feeds
+    /// have arrived.
+    fn header_label(&self) -> &str {
+        self.saved_feeds
+            .iter()
+            .find(|p| p.source == self.current_source)
+            .map(|p| p.display_name.as_str())
+            .unwrap_or("Following")
     }
 
     /// Toggle the focused post's like state optimistically + dispatch
@@ -321,8 +372,17 @@ impl Screen for TimelineScreen {
         // ─── 1. Dispatch initial fetch on first frame. ─────────────────
         if !self.dispatched {
             if let Some(worker) = ctx.worker {
-                worker.send(WorkRequest::FetchTimeline { cursor: None });
+                worker.send(WorkRequest::FetchFeed {
+                    source: self.current_source.clone(),
+                    cursor: None,
+                });
                 self.dispatched = true;
+            }
+        }
+        if !self.saved_feeds_dispatched {
+            if let Some(worker) = ctx.worker {
+                worker.send(WorkRequest::FetchSavedFeeds);
+                self.saved_feeds_dispatched = true;
             }
         }
 
@@ -454,7 +514,8 @@ impl Screen for TimelineScreen {
                     self.scroll_y as i32 + VIEWPORT_H + PAGINATION_THRESHOLD >= total_h;
                 if near_bottom {
                     if let Some(worker) = ctx.worker {
-                        worker.send(WorkRequest::FetchTimeline {
+                        worker.send(WorkRequest::FetchFeed {
+                            source: self.current_source.clone(),
                             cursor: Some(cursor.clone()),
                         });
                         self.fetching_more = true;
@@ -470,7 +531,7 @@ impl Screen for TimelineScreen {
         // show a placeholder.
         if let TimelineState::Loaded { posts, .. } = &self.state {
             if let Some(worker) = ctx.worker {
-                let mut y_probe = HEADER_H - self.scroll_y as i32;
+                let mut y_probe = VIEWPORT_TOP - self.scroll_y as i32;
                 for (post, &row_h) in posts.iter().zip(self.row_heights.iter()) {
                     let row_bottom = y_probe + row_h;
                     if row_bottom > VIEWPORT_TOP && y_probe < SCREEN_HEIGHT {
@@ -487,6 +548,21 @@ impl Screen for TimelineScreen {
                         }
                     }
                     y_probe += row_h;
+                }
+            }
+        }
+
+        // ─── 5c. Avatar dispatch for pill row. ────────────────────────
+        if let Some(worker) = ctx.worker {
+            for pin in self.saved_feeds.iter() {
+                if let Some(url) = pin.avatar_url.as_ref() {
+                    let url = avatar_thumbnail_jpeg(url);
+                    if !ctx.texture_cache.contains(&url)
+                        && !self.inflight_avatars.contains(&url)
+                    {
+                        worker.send(WorkRequest::FetchImage { url: url.clone() });
+                        self.inflight_avatars.insert(url);
+                    }
                 }
             }
         }
@@ -525,7 +601,7 @@ impl Screen for TimelineScreen {
                         self.selected_idx,
                     );
                     if self.fetching_more {
-                        let bottom_y = HEADER_H + total_h - self.scroll_y as i32 + 8;
+                        let bottom_y = VIEWPORT_TOP + total_h - self.scroll_y as i32 + 8;
                         if bottom_y > VIEWPORT_TOP && bottom_y < SCREEN_HEIGHT - 8 {
                             frame.draw_text_centered(
                                 font,
@@ -537,7 +613,7 @@ impl Screen for TimelineScreen {
                         }
                     } else if next_cursor.is_none() {
                         // Reached end of feed: subtle marker at the bottom.
-                        let bottom_y = HEADER_H + total_h - self.scroll_y as i32 + 8;
+                        let bottom_y = VIEWPORT_TOP + total_h - self.scroll_y as i32 + 8;
                         if bottom_y > VIEWPORT_TOP && bottom_y < SCREEN_HEIGHT - 8 {
                             frame.draw_text_centered(
                                 font,
@@ -568,10 +644,22 @@ impl Screen for TimelineScreen {
             }
         }
 
-        // ─── 7. Sticky header (drawn after posts so it covers any row
-        //        that scrolled up into its zone). ──────────────────────
+        // ─── 7. Pill row (drawn after posts so it covers any row that
+        //        scrolled up into its zone). Hit-tested below. ─────────
+        let pill_tap_idx = draw_pill_row(
+            frame,
+            font,
+            &self.saved_feeds,
+            &self.current_source,
+            &mut self.pill_buttons,
+            ctx,
+        );
+
+        // ─── 8. Sticky header (drawn after pill row so it covers any
+        //        pill content that exceeds its bounds). ──────────────────
+        let header_label = self.header_label().to_string();
         frame.fill_rect(0.0, 0.0, SCREEN_WIDTH as f32, HEADER_H as f32, theme::FIELD_BG);
-        frame.draw_text_centered(font, 26, theme::TEXT_PRIMARY, 1.1, "Following");
+        frame.draw_text_centered(font, 26, theme::TEXT_PRIMARY, 1.1, &header_label);
         frame.fill_rect(
             0.0,
             HEADER_H as f32 - 1.0,
@@ -579,6 +667,15 @@ impl Screen for TimelineScreen {
             1.0,
             theme::TEXT_MUTED,
         );
+
+        // Apply pill tap (after rendering, so this frame still shows
+        // the previous feed; switch takes effect next frame).
+        if let Some(idx) = pill_tap_idx {
+            if let Some(pin) = self.saved_feeds.get(idx) {
+                let new_source = pin.source.clone();
+                self.switch_to(new_source);
+            }
+        }
 
         // ─── 8. Tab bar (last — covers any row that scrolled into its
         //        zone). Tap → switch top-level. ─────────────────────────
@@ -597,7 +694,7 @@ impl Screen for TimelineScreen {
             let touches: Vec<_> = ctx.touches.iter().map(|t| (t.x, t.y)).collect();
             let mut tap_action: Option<TapAction> = None;
             if let TimelineState::Loaded { posts, .. } = &self.state {
-                let mut y_probe = HEADER_H - self.scroll_y as i32;
+                let mut y_probe = VIEWPORT_TOP - self.scroll_y as i32;
                 for (idx, (post, &row_h)) in
                     posts.iter().zip(self.row_heights.iter()).enumerate()
                 {
@@ -692,29 +789,45 @@ impl Screen for TimelineScreen {
 
     fn handle_worker_response(&mut self, resp: WorkResponse) {
         match resp {
-            WorkResponse::Timeline(Ok(batch)) => {
-                self.fetching_more = false;
-                match &mut self.state {
-                    TimelineState::Loaded { posts, next_cursor } => {
-                        posts.extend(batch.posts);
-                        *next_cursor = batch.cursor;
+            // Feed page for the *currently shown* feed.
+            WorkResponse::FeedPage { source, batch } if source == self.current_source => {
+                match batch {
+                    Ok(batch) => {
+                        self.fetching_more = false;
+                        match &mut self.state {
+                            TimelineState::Loaded { posts, next_cursor } => {
+                                posts.extend(batch.posts);
+                                *next_cursor = batch.cursor;
+                            }
+                            _ => {
+                                self.state = TimelineState::Loaded {
+                                    posts: batch.posts,
+                                    next_cursor: batch.cursor,
+                                };
+                            }
+                        }
                     }
-                    _ => {
-                        self.state = TimelineState::Loaded {
-                            posts: batch.posts,
-                            next_cursor: batch.cursor,
-                        };
+                    Err(e) => {
+                        self.fetching_more = false;
+                        if matches!(self.state, TimelineState::Loading) {
+                            self.state = TimelineState::Error(e);
+                        }
+                        // Page-load failures past the first page: silent.
+                        // User can scroll to retrigger.
                     }
                 }
             }
-            WorkResponse::Timeline(Err(e)) => {
-                self.fetching_more = false;
-                if matches!(self.state, TimelineState::Loading) {
-                    self.state = TimelineState::Error(e);
-                }
-                // Page-load failures: silently ignored. The user can scroll
-                // to retrigger; the cursor is unchanged so the next attempt
-                // starts from the same point.
+            // Stale feed page (user switched feeds while in flight). Drop.
+            WorkResponse::FeedPage { .. } => {}
+            // Saved feeds populate the pill row.
+            WorkResponse::SavedFeeds(Ok(b)) => {
+                self.pill_buttons.clear();
+                self.pill_buttons.resize_with(b.pins.len(), ButtonState::default);
+                self.saved_feeds = b.pins;
+            }
+            WorkResponse::SavedFeeds(Err(e)) => {
+                eprintln!("FetchSavedFeeds failed: {e} — falling back to Following-only");
+                // saved_feeds stays empty → pill row renders nothing extra.
             }
             // Profile responses can arrive here if the previous screen
             // dispatched one and the user transitioned before the response
@@ -802,6 +915,114 @@ pub(crate) fn measure_post_row(
 
 /// Iterate through `posts`, advancing `y` by each post's cached height.
 /// Skip rows entirely outside the viewport; otherwise call `draw_post_row`.
+/// Render the horizontal pill row at the top of TimelineScreen and
+/// hit-test pill taps. Returns `Some(idx)` when a non-active pill is
+/// tapped (caller switches feed). The pill row is opaque, so it covers
+/// any post row that scrolled up into its zone (HEADER_H..HEADER_H+PILL_ROW_H).
+///
+/// Layout: 6 px left/right outer margin; each pill is at `y =
+/// HEADER_H + 7`, h = PILL_ROW_H - 14 = 36. Pill content order: optional
+/// 28×28 avatar (Following has none) → 6 px gap → display name in 0.95
+/// scale. Active pill has ACCENT background; inactive uses BACKGROUND.
+/// Phase 5.1 doesn't horizontally scroll — pills past the right edge are
+/// off-screen (and therefore not tappable).
+fn draw_pill_row(
+    frame: &mut Frame,
+    font: &Font,
+    pins: &[SavedFeedPin],
+    current: &FeedSource,
+    pill_buttons: &mut [ButtonState],
+    ctx: &UiCtx,
+) -> Option<usize> {
+    let bar_y = HEADER_H;
+    frame.fill_rect(
+        0.0,
+        bar_y as f32,
+        SCREEN_WIDTH as f32,
+        PILL_ROW_H as f32,
+        theme::BACKGROUND,
+    );
+    frame.fill_rect(
+        0.0,
+        (bar_y + PILL_ROW_H - 1) as f32,
+        SCREEN_WIDTH as f32,
+        1.0,
+        theme::TEXT_MUTED,
+    );
+
+    let pill_h = PILL_ROW_H - 14;
+    let pill_y = bar_y + 7;
+    let avatar_size = pill_h - 8; // 28 px, 4 px top/bottom inset
+    let mut cx = 6;
+    let mut clicked: Option<usize> = None;
+
+    for (idx, pin) in pins.iter().enumerate() {
+        let active = pin.source == *current;
+        let label_scale = 0.95;
+        let (tw, _) = frame.measure_text(font, label_scale, &pin.display_name);
+        let has_avatar = pin.avatar_url.is_some();
+        let inner_pad_l = if has_avatar { 6 + avatar_size + 6 } else { 12 };
+        let pill_w = inner_pad_l + tw + 12;
+
+        let bg_color = if active {
+            theme::ACCENT
+        } else {
+            theme::FIELD_BG
+        };
+        let text_color = if active {
+            theme::TEXT_PRIMARY
+        } else {
+            theme::TEXT_MUTED
+        };
+
+        frame.fill_rect(cx as f32, pill_y as f32, pill_w as f32, pill_h as f32, bg_color);
+        if has_avatar {
+            let avatar_x = cx + 6;
+            let avatar_y = pill_y + 4;
+            let url_thumb = pin.avatar_url.as_deref().map(avatar_thumbnail_jpeg);
+            if let Some(url) = url_thumb.as_deref() {
+                if let Some(tex) = ctx.texture_cache.get(url) {
+                    let sx = avatar_size as f32 / tex.width().max(1) as f32;
+                    let sy = avatar_size as f32 / tex.height().max(1) as f32;
+                    frame.draw_texture_scale(tex, avatar_x as f32, avatar_y as f32, sx, sy);
+                } else {
+                    frame.fill_rect(
+                        avatar_x as f32,
+                        avatar_y as f32,
+                        avatar_size as f32,
+                        avatar_size as f32,
+                        placeholder_color(&pin.display_name),
+                    );
+                }
+            }
+        }
+        let text_x = cx + inner_pad_l;
+        let text_y = pill_y + (pill_h + 18) / 2 - 4;
+        frame.draw_text(font, text_x, text_y, text_color, label_scale, &pin.display_name);
+
+        // Hit-test only if pill is on-screen.
+        if cx + pill_w <= SCREEN_WIDTH && idx < pill_buttons.len() {
+            let pill_rect = Rect::new(
+                cx as f32,
+                pill_y as f32,
+                pill_w as f32,
+                pill_h as f32,
+            );
+            let state = &mut pill_buttons[idx];
+            let pressed_now = ctx.touches.iter().any(|t| pill_rect.contains(t.x, t.y));
+            let just_clicked =
+                state.pressed_last && !pressed_now && ctx.touches.is_empty();
+            state.pressed_last = pressed_now;
+            if just_clicked && !active {
+                clicked = Some(idx);
+            }
+        }
+        cx += pill_w + 6;
+    }
+
+    clicked
+}
+
 fn draw_post_list(
     frame: &mut Frame,
     font: &Font,
@@ -814,7 +1035,7 @@ fn draw_post_list(
     avatar_mask_field: Option<&Texture>,
     selected_idx: usize,
 ) {
-    let mut y = HEADER_H - scroll_y as i32;
+    let mut y = VIEWPORT_TOP - scroll_y as i32;
     for (i, (post, &row_h)) in posts.iter().zip(row_heights.iter()).enumerate() {
         let row_bottom = y + row_h;
         if row_bottom > VIEWPORT_TOP && y < VIEWPORT_BOTTOM {

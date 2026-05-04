@@ -38,12 +38,16 @@ use std::thread::{self, JoinHandle};
 
 use std::str::FromStr;
 
-use atrium_api::app::bsky::actor::defs::{ProfileView, ProfileViewDetailedData};
-use atrium_api::app::bsky::actor::{get_profile, search_actors};
+use atrium_api::app::bsky::actor::defs::{
+    PreferencesItem, ProfileView, ProfileViewDetailedData,
+};
+use atrium_api::app::bsky::actor::{get_preferences, get_profile, search_actors};
 use atrium_api::app::bsky::feed::search_posts;
 use atrium_api::app::bsky::feed::defs::{
     FeedViewPost, PostView, ThreadViewPostParentRefs, ThreadViewPostRepliesItem,
 };
+use atrium_api::app::bsky::feed::get_feed;
+use atrium_api::app::bsky::feed::get_feed_generators;
 use atrium_api::app::bsky::feed::get_post_thread;
 use atrium_api::app::bsky::feed::get_post_thread::OutputThreadRefs;
 use atrium_api::app::bsky::feed::get_timeline;
@@ -64,6 +68,24 @@ use bsky_net::VitaHttpClient;
 use crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError};
 use futures::executor::block_on;
 
+/// Identifies which feed a `FetchFeed` request targets.
+///
+/// `Following` uses `app.bsky.feed.getTimeline` (the user's home feed);
+/// `Feed(uri)` uses `app.bsky.feed.getFeed` against an arbitrary feed
+/// generator's AT-URI (typically read from the user's pinned-feeds
+/// preference). The same enum is echoed back in `FeedPage` responses so
+/// `TimelineScreen` can drop stale responses for feeds the user has
+/// switched away from.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum FeedSource {
+    /// User's home Following timeline.
+    Following,
+    /// Custom feed by AT-URI (e.g. `at://did:plc:.../app.bsky.feed.generator/whats-hot`).
+    /// Phase 5.1 doesn't support `app.bsky.graph.list` URIs (lists);
+    /// those use a separate `getListFeed` endpoint and are deferred.
+    Feed(String),
+}
+
 /// Work the worker thread can be asked to perform. Add a variant per new
 /// async operation; keep variants narrow (one network call each) so the
 /// response side stays tractable.
@@ -72,11 +94,18 @@ pub enum WorkRequest {
     /// profile (DID resolved from the session). `Some(handle_or_did)`
     /// fetches that actor's profile.
     FetchProfile { actor: Option<String> },
-    /// Fetch a page of the home (Following) timeline. `cursor: None` for
-    /// the first page; subsequent pages pass the cursor returned in the
-    /// previous `TimelineBatch`. End-of-feed is signalled by a response
-    /// with `cursor: None`.
-    FetchTimeline { cursor: Option<String> },
+    /// Fetch a page of `source`. `cursor: None` for the first page;
+    /// subsequent pages pass the cursor returned in the previous
+    /// `FeedPage` response. End-of-feed is signalled by a response with
+    /// `cursor: None`.
+    FetchFeed {
+        source: FeedSource,
+        cursor: Option<String>,
+    },
+    /// Fetch the user's pinned-feeds preference + hydrate generator
+    /// metadata (display name, avatar) for each pinned custom feed in
+    /// one round-trip via `app.bsky.feed.getFeedGenerators`.
+    FetchSavedFeeds,
     /// Fetch an arbitrary image URL (avatars, embeds). No auth: uses a
     /// fresh `VitaHttpClient` directly, bypassing the agent's session
     /// machinery. The URL is echoed back in the response so the main
@@ -152,6 +181,28 @@ pub struct TimelineBatch {
     pub cursor: Option<String>,
 }
 
+/// One pinned saved-feed entry, hydrated with display metadata so the
+/// pill row can render without an additional fetch.
+#[derive(Clone, Debug)]
+pub struct SavedFeedPin {
+    pub source: FeedSource,
+    /// Display name. `"Following"` for the Following pin; the feed
+    /// generator's `display_name` for custom feeds (or a fallback
+    /// extracted from the AT-URI if hydration failed).
+    pub display_name: String,
+    /// Avatar URL (from the generator's metadata). `None` for the
+    /// Following pin or when hydration failed.
+    pub avatar_url: Option<String>,
+}
+
+/// User's pinned saved feeds, in display order. Always begins with a
+/// `Following` entry (we synthesize it if the user has un-pinned the
+/// Following timeline in their prefs — Following is the conceptual home
+/// view and we always offer it as the first pill).
+pub struct SavedFeedsBatch {
+    pub pins: Vec<SavedFeedPin>,
+}
+
 /// One page of notifications + the next-page cursor (None = end).
 pub struct NotificationBatch {
     pub notifications: Vec<Notification>,
@@ -189,7 +240,15 @@ pub struct ThreadBatch {
 /// produced it, with a `Result` because every PDS call can fail.
 pub enum WorkResponse {
     Profile(Result<Box<ProfileViewDetailedData>, String>),
-    Timeline(Result<TimelineBatch, String>),
+    /// One page of feed posts. `source` echoes the request so screens
+    /// holding multiple feeds in flight (or that have switched away
+    /// from a feed) can route or drop the response correctly.
+    FeedPage {
+        source: FeedSource,
+        batch: Result<TimelineBatch, String>,
+    },
+    /// User's pinned saved feeds (already hydrated with display metadata).
+    SavedFeeds(Result<SavedFeedsBatch, String>),
     /// Raw bytes of the requested image. Caller decodes with
     /// `bsky_render::Texture::from_image_bytes`. `url` echoes the
     /// request URL so callers can route the result to the right cache
@@ -311,25 +370,8 @@ fn handle_request(client: &AuthClient, req: WorkRequest) -> WorkResponse {
                 Err(e) => WorkResponse::Profile(Err(format!("{e}"))),
             }
         }
-        WorkRequest::FetchTimeline { cursor } => {
-            // Page size 50: covers ~10 screens of posts on a Vita display
-            // and is well under atrium's cap of 100.
-            let limit = LimitedNonZeroU8::<100>::try_from(50)
-                .expect("50 fits in LimitedNonZeroU8<100>");
-            let params = get_timeline::ParametersData {
-                cursor,
-                limit: Some(limit),
-                algorithm: None,
-            }
-            .into();
-            match block_on(client.agent.api.app.bsky.feed.get_timeline(params)) {
-                Ok(o) => WorkResponse::Timeline(Ok(TimelineBatch {
-                    posts: o.data.feed,
-                    cursor: o.data.cursor,
-                })),
-                Err(e) => WorkResponse::Timeline(Err(format!("{e}"))),
-            }
-        }
+        WorkRequest::FetchFeed { source, cursor } => fetch_feed_page(client, source, cursor),
+        WorkRequest::FetchSavedFeeds => fetch_saved_feeds(client),
         WorkRequest::FetchImage { url } => {
             let bytes = fetch_image_bytes(&url);
             WorkResponse::Image { url, bytes }
@@ -435,6 +477,182 @@ fn search_posts_handler(
         })),
         Err(e) => WorkResponse::SearchPosts(Err(format!("{e}"))),
     }
+}
+
+/// Fetch one page of `source`. Page size 50 (well under atrium's cap of
+/// 100). For Following: `getTimeline`; for custom feeds: `getFeed`.
+fn fetch_feed_page(
+    client: &AuthClient,
+    source: FeedSource,
+    cursor: Option<String>,
+) -> WorkResponse {
+    let limit = LimitedNonZeroU8::<100>::try_from(50)
+        .expect("50 fits in LimitedNonZeroU8<100>");
+    match &source {
+        FeedSource::Following => {
+            let params = get_timeline::ParametersData {
+                cursor,
+                limit: Some(limit),
+                algorithm: None,
+            }
+            .into();
+            match block_on(client.agent.api.app.bsky.feed.get_timeline(params)) {
+                Ok(o) => WorkResponse::FeedPage {
+                    source,
+                    batch: Ok(TimelineBatch {
+                        posts: o.data.feed,
+                        cursor: o.data.cursor,
+                    }),
+                },
+                Err(e) => WorkResponse::FeedPage {
+                    source,
+                    batch: Err(format!("{e}")),
+                },
+            }
+        }
+        FeedSource::Feed(uri) => {
+            let params = get_feed::ParametersData {
+                cursor,
+                feed: uri.clone(),
+                limit: Some(limit),
+            }
+            .into();
+            match block_on(client.agent.api.app.bsky.feed.get_feed(params)) {
+                Ok(o) => WorkResponse::FeedPage {
+                    source,
+                    batch: Ok(TimelineBatch {
+                        posts: o.data.feed,
+                        cursor: o.data.cursor,
+                    }),
+                },
+                Err(e) => WorkResponse::FeedPage {
+                    source,
+                    batch: Err(format!("{e}")),
+                },
+            }
+        }
+    }
+}
+
+/// Read the user's pinned-feeds preference + hydrate generator metadata
+/// in one round-trip. Output always begins with a `Following` pin (we
+/// synthesize one if it's not in the prefs).
+fn fetch_saved_feeds(client: &AuthClient) -> WorkResponse {
+    // 1. Read prefs.
+    let params = get_preferences::ParametersData {}.into();
+    let prefs = match block_on(client.agent.api.app.bsky.actor.get_preferences(params)) {
+        Ok(o) => o.data.preferences,
+        Err(e) => return WorkResponse::SavedFeeds(Err(format!("{e}"))),
+    };
+
+    // 2. Walk to find a SavedFeedsPrefV2 (preferred) or fall back to v1.
+    let mut v2_items: Option<Vec<atrium_api::app::bsky::actor::defs::SavedFeed>> = None;
+    let mut v1_pinned: Option<Vec<String>> = None;
+    for item in prefs.iter() {
+        if let Union::Refs(refs) = item {
+            match refs {
+                PreferencesItem::SavedFeedsPrefV2(b) => {
+                    v2_items = Some(b.data.items.clone());
+                    break;
+                }
+                PreferencesItem::SavedFeedsPref(b) => {
+                    v1_pinned = Some(b.data.pinned.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // 3. Project into PendingPin: a pin record before display-name hydration.
+    enum PendingPin {
+        Following,
+        Feed { uri: String },
+    }
+    let mut pending: Vec<PendingPin> = Vec::new();
+    let mut have_following = false;
+    if let Some(items) = v2_items {
+        for it in items.iter() {
+            if !it.data.pinned {
+                continue;
+            }
+            match it.data.r#type.as_str() {
+                "timeline" => {
+                    pending.push(PendingPin::Following);
+                    have_following = true;
+                }
+                "feed" => pending.push(PendingPin::Feed {
+                    uri: it.data.value.clone(),
+                }),
+                // Skip "list" (deferred) + any unknown type.
+                _ => {}
+            }
+        }
+    } else if let Some(pinned) = v1_pinned {
+        for uri in pinned {
+            pending.push(PendingPin::Feed { uri });
+        }
+    }
+    if !have_following {
+        // Always show Following as the first pill, even if the user has
+        // un-pinned it in their prefs.
+        pending.insert(0, PendingPin::Following);
+    }
+
+    // 4. Hydrate display names + avatars for all Feed entries in one call.
+    let feed_uris: Vec<String> = pending
+        .iter()
+        .filter_map(|p| match p {
+            PendingPin::Feed { uri } => Some(uri.clone()),
+            PendingPin::Following => None,
+        })
+        .collect();
+    let mut hydrated: std::collections::HashMap<String, (String, Option<String>)> =
+        std::collections::HashMap::new();
+    if !feed_uris.is_empty() {
+        let params = get_feed_generators::ParametersData { feeds: feed_uris }.into();
+        match block_on(client.agent.api.app.bsky.feed.get_feed_generators(params)) {
+            Ok(o) => {
+                for view in o.data.feeds.iter() {
+                    hydrated.insert(
+                        view.data.uri.clone(),
+                        (view.data.display_name.clone(), view.data.avatar.clone()),
+                    );
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "get_feed_generators failed: {e} — pills will use AT-URI fallbacks"
+                );
+            }
+        }
+    }
+
+    // 5. Materialize SavedFeedPin list.
+    let pins: Vec<SavedFeedPin> = pending
+        .into_iter()
+        .map(|p| match p {
+            PendingPin::Following => SavedFeedPin {
+                source: FeedSource::Following,
+                display_name: "Following".to_string(),
+                avatar_url: None,
+            },
+            PendingPin::Feed { uri } => {
+                let (display_name, avatar_url) =
+                    hydrated.get(&uri).cloned().unwrap_or_else(|| {
+                        // Fallback: the rkey portion of the AT-URI if hydration
+                        // failed. Better than rendering an empty pill.
+                        let fallback = uri.rsplit('/').next().unwrap_or(&uri).to_string();
+                        (fallback, None)
+                    });
+                SavedFeedPin {
+                    source: FeedSource::Feed(uri),
+                    display_name,
+                    avatar_url,
+                }
+            }
+        })
+        .collect();
+    WorkResponse::SavedFeeds(Ok(SavedFeedsBatch { pins }))
 }
 
 fn fetch_notifications(client: &AuthClient, cursor: Option<String>) -> WorkResponse {
