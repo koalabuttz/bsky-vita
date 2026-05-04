@@ -19,10 +19,23 @@ pub fn avatar_thumbnail_jpeg(url: &str) -> String {
         return url.to_string();
     }
     let path = url.replacen(BSKY_CDN_PREFIX, BSKY_CDN_THUMB, 1);
-    if path.ends_with("@jpeg") || path.ends_with("@png") {
-        path
+    ensure_jpeg(&path)
+}
+
+/// Force a `@jpeg` suffix on the URL if it doesn't already have an
+/// explicit format selector. The Bluesky CDN uses `@jpeg` / `@png` /
+/// `@webp` to pick the response encoding; vita2d only decodes JPEG and
+/// PNG, so we coerce. Already-suffixed URLs pass through (lets us
+/// re-apply this idempotently on lookup + dispatch paths).
+pub fn ensure_jpeg(url: &str) -> String {
+    if url.ends_with("@jpeg") || url.ends_with("@png") {
+        url.to_string()
+    } else if url.ends_with("@webp") || url.ends_with("@avif") {
+        // Strip the foreign format selector and re-suffix with jpeg.
+        let cut = url.rfind('@').expect("'@' present");
+        format!("{}@jpeg", &url[..cut])
     } else {
-        format!("{path}@jpeg")
+        format!("{url}@jpeg")
     }
 }
 

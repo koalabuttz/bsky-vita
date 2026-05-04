@@ -211,7 +211,10 @@ impl Screen for ThreadScreen {
             let view_top = self.scroll_y as i32;
             let view_bottom = view_top + viewport_h;
             const SCROLL_MARGIN: i32 = 50;
-            if row_top < view_top + SCROLL_MARGIN {
+            if row_h > viewport_h {
+                // Taller-than-viewport rows pin to the top.
+                self.scroll_y = (row_top - SCROLL_MARGIN).max(0) as f32;
+            } else if row_top < view_top + SCROLL_MARGIN {
                 self.scroll_y = (row_top - SCROLL_MARGIN).max(0) as f32;
             } else if row_top + row_h > view_bottom - SCROLL_MARGIN {
                 self.scroll_y =
@@ -229,13 +232,20 @@ impl Screen for ThreadScreen {
         }
         self.scroll_y = self.scroll_y.clamp(0.0, max_scroll);
 
-        // Tap detection: author region → Push ProfileScreen for that
-        // actor. Same hit-test pattern as TimelineScreen but operating
-        // on the parent + main + replies list. Accumulates a tap
-        // result outside the immutable post borrow, then applies after.
+        // Tap detection. Three zones per row:
+        //   1. Author region (avatar / name) → Push ProfileScreen.
+        //   2. Quote-embed region (if any) → Push ThreadScreen of the
+        //      quoted post.
+        //   3. (Body / counts not separately handled in ThreadScreen;
+        //      tapping a non-author non-quote area is a no-op here —
+        //      we're already viewing the thread.)
         if !ctx.touches.is_empty() {
             let touches: Vec<_> = ctx.touches.iter().map(|t| (t.x, t.y)).collect();
-            let mut author_tap: Option<String> = None;
+            enum ThreadTap {
+                OpenProfile(String),
+                OpenThread(String),
+            }
+            let mut tap: Option<ThreadTap> = None;
             if let ThreadState::Loaded { posts, .. } = &self.state {
                 let mut y_probe = HEADER_H - self.scroll_y as i32;
                 for (post, &row_h) in posts.iter().zip(self.row_heights.iter()) {
@@ -248,19 +258,47 @@ impl Screen for ThreadScreen {
                             AVATAR_SIZE as f32,
                         );
                         if touches.iter().any(|&(x, y)| author_rect.contains(x, y)) {
-                            author_tap =
-                                Some(post.post.author.handle.as_str().to_string());
+                            tap = Some(ThreadTap::OpenProfile(
+                                post.post.author.handle.as_str().to_string(),
+                            ));
                             break;
+                        }
+                        if let Some(quote_uri) =
+                            crate::embeds::quote_uri_in_embed(post.post.embed.as_ref())
+                        {
+                            if let Some((ey, eh)) = crate::embeds::embed_rect(
+                                frame, font, post, y_probe, ctx.emoji,
+                            ) {
+                                let er = Rect::new(
+                                    TEXT_LEFT as f32,
+                                    ey as f32,
+                                    (SCREEN_WIDTH - TEXT_LEFT - ROW_PAD_X) as f32,
+                                    eh as f32,
+                                );
+                                if touches.iter().any(|&(x, y)| er.contains(x, y)) {
+                                    tap = Some(ThreadTap::OpenThread(quote_uri));
+                                    break;
+                                }
+                            }
                         }
                     }
                     y_probe += row_h;
                 }
             }
-            if let Some(handle) = author_tap {
-                return ScreenAction::Push(Box::new(ProfileScreen::new(
-                    Arc::clone(&self.client),
-                    Some(handle),
-                )));
+            match tap {
+                Some(ThreadTap::OpenProfile(handle)) => {
+                    return ScreenAction::Push(Box::new(ProfileScreen::new(
+                        Arc::clone(&self.client),
+                        Some(handle),
+                    )));
+                }
+                Some(ThreadTap::OpenThread(uri)) => {
+                    return ScreenAction::Push(Box::new(ThreadScreen::new(
+                        Arc::clone(&self.client),
+                        uri,
+                    )));
+                }
+                None => {}
             }
         }
         // Suppress unused-import lint when ROW_PAD_X is referenced only

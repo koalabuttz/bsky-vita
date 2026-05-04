@@ -198,7 +198,10 @@ impl Screen for SearchScreen {
             let view_top = self.scroll_y as i32;
             let view_bottom = view_top + VIEWPORT_H;
             const SCROLL_MARGIN: i32 = 50;
-            if row_top < view_top + SCROLL_MARGIN {
+            if row_h > VIEWPORT_H {
+                // Taller-than-viewport rows pin to the top.
+                self.scroll_y = (row_top - SCROLL_MARGIN).max(0) as f32;
+            } else if row_top < view_top + SCROLL_MARGIN {
                 self.scroll_y = (row_top - SCROLL_MARGIN).max(0) as f32;
             } else if row_top + row_h > view_bottom - SCROLL_MARGIN {
                 self.scroll_y =
@@ -519,6 +522,31 @@ impl Screen for SearchScreen {
                                     post.post.author.handle.as_str().to_string(),
                                 ));
                                 break;
+                            }
+                            // Quote-embed region (if any) → OpenThread of
+                            // the quoted post. Checked before the body
+                            // fallback.
+                            if let Some(quote_uri) =
+                                crate::embeds::quote_uri_in_embed(post.post.embed.as_ref())
+                            {
+                                if let Some((ey, eh)) = crate::embeds::embed_rect(
+                                    frame,
+                                    font,
+                                    post,
+                                    y_probe,
+                                    ctx.emoji,
+                                ) {
+                                    let er = Rect::new(
+                                        TEXT_LEFT as f32,
+                                        ey as f32,
+                                        (SCREEN_WIDTH - TEXT_LEFT - ROW_PAD_X) as f32,
+                                        eh as f32,
+                                    );
+                                    if touches.iter().any(|&(x, y)| er.contains(x, y)) {
+                                        tap_action = Some(SearchTapAction::OpenThread(quote_uri));
+                                        break;
+                                    }
+                                }
                             }
                             let body_rect = Rect::new(
                                 TEXT_LEFT as f32,

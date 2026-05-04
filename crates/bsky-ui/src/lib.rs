@@ -2,6 +2,7 @@
 
 pub mod cdn;
 pub mod compose;
+pub mod embeds;
 pub mod login;
 pub mod notifications;
 pub mod profile;

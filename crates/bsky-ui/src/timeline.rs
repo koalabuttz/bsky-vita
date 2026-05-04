@@ -489,7 +489,12 @@ impl Screen for TimelineScreen {
             let view_top = self.scroll_y as i32;
             let view_bottom = view_top + VIEWPORT_H;
             const SCROLL_MARGIN: i32 = 50;
-            if row_top < view_top + SCROLL_MARGIN {
+            if row_h > VIEWPORT_H {
+                // Post is taller than the viewport — pin its top so the
+                // user reads top-down. Snapping the bottom would put the
+                // header off-screen above and feel disorienting.
+                self.scroll_y = (row_top - SCROLL_MARGIN).max(0) as f32;
+            } else if row_top < view_top + SCROLL_MARGIN {
                 self.scroll_y = (row_top - SCROLL_MARGIN).max(0) as f32;
             } else if row_top + row_h > view_bottom - SCROLL_MARGIN {
                 self.scroll_y =
@@ -539,6 +544,19 @@ impl Screen for TimelineScreen {
                             // Transform the URL so cache lookup and fetch
                             // use the same vita2d-compatible JPEG variant.
                             let url = avatar_thumbnail_jpeg(url);
+                            if !ctx.texture_cache.contains(&url)
+                                && !self.inflight_avatars.contains(&url)
+                            {
+                                worker.send(WorkRequest::FetchImage { url: url.clone() });
+                                self.inflight_avatars.insert(url);
+                            }
+                        }
+                        // Embed image URLs (post images, link card thumb,
+                        // video thumb, quote-author avatar). These are
+                        // already CDN-resolved JPEGs.
+                        for url in
+                            crate::embeds::embed_image_urls(post.post.embed.as_ref())
+                        {
                             if !ctx.texture_cache.contains(&url)
                                 && !self.inflight_avatars.contains(&url)
                             {
@@ -734,9 +752,31 @@ impl Screen for TimelineScreen {
                             tap_action = Some(TapAction::ToggleRepost(idx));
                             break;
                         }
+                        // Quote-embed region (if any) → OpenThread of the
+                        // quoted post. Checked BEFORE the body fallback so
+                        // a tap on the quote card opens the right thread.
+                        if let Some(quote_uri) =
+                            crate::embeds::quote_uri_in_embed(post.post.embed.as_ref())
+                        {
+                            if let Some((ey, eh)) =
+                                crate::embeds::embed_rect(frame, font, post, y_probe, ctx.emoji)
+                            {
+                                let embed_rect = Rect::new(
+                                    TEXT_LEFT as f32,
+                                    ey as f32,
+                                    (SCREEN_WIDTH - TEXT_LEFT - ROW_PAD_X) as f32,
+                                    eh as f32,
+                                );
+                                if touches.iter().any(|&(x, y)| embed_rect.contains(x, y))
+                                {
+                                    tap_action = Some(TapAction::OpenThread(quote_uri));
+                                    break;
+                                }
+                            }
+                        }
                         // Body region: anywhere in the row that isn't
-                        // the author region or the counts row → open
-                        // thread for that post.
+                        // the author region, counts row, or a quote
+                        // embed → open thread for *this* post.
                         let body_rect = Rect::new(
                             TEXT_LEFT as f32,
                             (y_probe + ROW_PAD_Y) as f32,
@@ -907,7 +947,14 @@ pub(crate) fn measure_post_row(
     let inner_w = SCREEN_WIDTH - TEXT_LEFT - ROW_PAD_X;
     let body_text = extract_post_text(&post.post.record).unwrap_or_default();
     let body_h = frame.measure_text_wrapped_with_emoji(font, inner_w, 1.0, &body_text, emoji);
-    let text_block_h = ROW_PAD_Y + TOP_LINE_H + body_h + BODY_GAP + FOOTER_H;
+    let embed_h = crate::embeds::measure_embed_block(frame, font, post.post.embed.as_ref(), emoji);
+    let bottom_gap = if embed_h > 0 {
+        crate::embeds::EMBED_BOTTOM_GAP
+    } else {
+        BODY_GAP
+    };
+    let text_block_h =
+        ROW_PAD_Y + TOP_LINE_H + body_h + embed_h + bottom_gap + FOOTER_H;
     // Ensure the row is at least as tall as the avatar slot.
     let avatar_block_h = ROW_PAD_Y + AVATAR_SIZE + FOOTER_H;
     text_block_h.max(avatar_block_h)
@@ -1160,6 +1207,26 @@ pub(crate) fn draw_post_row(
         emoji,
     );
 
+    // Embed block (images / link card / quote / video thumb) below body.
+    let embed_consumed_h =
+        if let Some(embed) = post.post.embed.as_ref() {
+            let block = crate::embeds::measure_embed_block(frame, font, Some(embed), emoji);
+            if block > 0 {
+                crate::embeds::draw_embed_block(
+                    frame,
+                    font,
+                    embed,
+                    inner_left,
+                    body_y + body_h + crate::embeds::EMBED_GAP,
+                    cache,
+                    emoji,
+                );
+            }
+            block
+        } else {
+            0
+        };
+
     // Counts row, three segments rendered in sequence with per-segment
     // color reflecting the viewer's engagement state. Liked / reposted
     // segments render in ACCENT (Bsky-blue); idle in TEXT_MUTED.
@@ -1182,7 +1249,12 @@ pub(crate) fn draw_post_row(
     let reposts_str = format!("{reposts} reposts");
     let replies_str = format!("{replies} replies");
     let sep_str = "  ·  ";
-    let counts_y = body_y + body_h + BODY_GAP;
+    let post_embed_gap = if embed_consumed_h > 0 {
+        crate::embeds::EMBED_BOTTOM_GAP
+    } else {
+        BODY_GAP
+    };
+    let counts_y = body_y + body_h + embed_consumed_h + post_embed_gap;
     let scale = 0.85;
     // Sequential draw: each segment advances current_x by its width
     // (measure_text — chained draw_text return values aren't reliable
