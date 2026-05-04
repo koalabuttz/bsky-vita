@@ -20,6 +20,7 @@ vitasdk-sys = { workspace = true }
 vita-newlib-shims = { workspace = true }
 
 # Phase 1 stack
+bsky-log    = { path = "../crates/bsky-log" }
 bsky-net    = { path = "../crates/bsky-net" }
 bsky-auth   = { path = "../crates/bsky-auth" }
 bsky-models = { path = "../crates/bsky-models" }

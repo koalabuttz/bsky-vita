@@ -32,10 +32,11 @@ use bsky_ui::{
 use bsky_worker::{WorkResponse, Worker};
 
 fn main() {
+    bsky_log::init("ux0:/data/BSKY00001/run.log");
     let mut render = match Render::init() {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("vita2d_init failed: {e}; sleeping forever");
+            bsky_log::log!("vita2d_init failed: {e}; sleeping forever");
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(60));
             }
@@ -148,10 +149,13 @@ fn main() {
                 {
                     match texture_cache.insert(url.clone(), b) {
                         Ok(()) => resp,
-                        Err(e) => WorkResponse::Image {
-                            url: url.clone(),
-                            bytes: Err(format!("decode: {e}")),
-                        },
+                        Err(e) => {
+                            bsky_log::log!("decode failed for {url}: {e}");
+                            WorkResponse::Image {
+                                url: url.clone(),
+                                bytes: Err(format!("decode: {e}")),
+                            }
+                        }
                     }
                 } else {
                     resp

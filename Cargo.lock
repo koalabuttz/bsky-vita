@@ -151,6 +151,7 @@ dependencies = [
  "atrium-common",
  "atrium-identity",
  "atrium-xrpc",
+ "bsky-log",
  "bsky-net",
  "futures",
  "serde",
@@ -172,6 +173,10 @@ version = "0.1.0"
 dependencies = [
  "vitasdk-sys",
 ]
+
+[[package]]
+name = "bsky-log"
+version = "0.1.0"
 
 [[package]]
 name = "bsky-models"
@@ -220,6 +225,7 @@ dependencies = [
  "bsky-auth",
  "bsky-ime",
  "bsky-input",
+ "bsky-log",
  "bsky-models",
  "bsky-net",
  "bsky-render",
@@ -238,6 +244,7 @@ dependencies = [
  "atrium-api",
  "atrium-xrpc",
  "bsky-auth",
+ "bsky-log",
  "bsky-net",
  "crossbeam-channel",
  "futures",

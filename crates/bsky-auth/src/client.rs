@@ -93,10 +93,11 @@ pub fn try_resume_existing_session() -> Result<Option<AuthClient>, AuthError> {
 
     match block_on(agent.resume_session(session)) {
         Ok(()) => Ok(Some(AuthClient { agent, resolved })),
-        Err(_) => {
+        Err(e) => {
             // Refresh failed (or getSession bounced). Treat as no session;
             // the caller will route to LoginScreen. We deliberately don't
             // delete session.json here — leave that to an explicit logout.
+            bsky_log::log!("resume_session bounced: {e}");
             Ok(None)
         }
     }

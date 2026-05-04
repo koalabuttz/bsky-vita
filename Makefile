@@ -17,7 +17,7 @@ help:
 	@echo "  push-font    Upload app/static/Inter-Regular.ttf to ux0:/app/$(TITLE_ID)/ (one-shot)"
 	@echo "  push-emoji   Upload app/static/twemoji.png to ux0:/app/$(TITLE_ID)/ (one-shot, ~2.5 MB)"
 	@echo "  push-mask    Upload app/static/avatar_mask_96.png to ux0:/app/$(TITLE_ID)/ (one-shot, ~500 B)"
-	@echo "  fetch-log    Pull ux0:data/$(TITLE_ID)/spike.log via vitacompanion FTP"
+	@echo "  fetch-log    Pull ux0:data/$(TITLE_ID)/run.log via vitacompanion FTP"
 	@echo "  test         Host-side library tests (excludes the Vita-target bin)"
 	@echo "  clean        Remove build artifacts"
 	@echo
@@ -76,7 +76,7 @@ push-creds:
 fetch-log:
 	@if [ -z "$$VITA_IP" ]; then echo "VITA_IP env var not set"; exit 1; fi
 	curl -sS --connect-timeout 5 --max-time 15 \
-		"ftp://$$VITA_IP:1337/ux0:/data/$(TITLE_ID)/spike.log"
+		"ftp://$$VITA_IP:1337/ux0:/data/$(TITLE_ID)/run.log"
 
 # Push the Inter TTF (~680 KB). Required once before the app first reads
 # `app0:Inter-Regular.ttf`; subsequent rebuilds via `make run` re-use the

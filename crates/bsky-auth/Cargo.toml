@@ -6,6 +6,7 @@ license.workspace = true
 description = "Identity resolution + app-password createSession + refresh rotation"
 
 [dependencies]
+bsky-log        = { path = "../bsky-log" }
 bsky-net        = { path = "../bsky-net" }
 atrium-api      = { workspace = true }
 atrium-xrpc     = { workspace = true }

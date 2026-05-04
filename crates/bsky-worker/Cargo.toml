@@ -7,6 +7,7 @@ description = "Worker thread + crossbeam channels for non-blocking PDS calls"
 
 [dependencies]
 bsky-auth         = { path = "../bsky-auth" }
+bsky-log          = { path = "../bsky-log" }
 bsky-net          = { path = "../bsky-net" }
 atrium-api        = { workspace = true }
 atrium-xrpc       = { workspace = true }

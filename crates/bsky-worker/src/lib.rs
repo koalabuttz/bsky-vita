@@ -331,12 +331,49 @@ fn run(
 ) {
     while let Ok(req) = requests.recv() {
         let resp = handle_request(&client, req);
+        log_if_err(&resp);
         if responses.send(resp).is_err() {
             // Main thread dropped the receiver — exit.
             return;
         }
     }
     // Sender dropped on the request side — Worker handle was dropped.
+}
+
+/// Append a one-line summary to the disk log if `resp` carries an
+/// `Err`. Lets us inspect post-mortem when a screen swallowed a
+/// network failure (most do — they show fallbacks rather than error
+/// UIs).
+fn log_if_err(resp: &WorkResponse) {
+    match resp {
+        WorkResponse::Profile(Err(e)) => bsky_log::log!("worker: Profile err: {e}"),
+        WorkResponse::FeedPage { source, batch: Err(e) } => {
+            bsky_log::log!("worker: FeedPage({source:?}) err: {e}")
+        }
+        WorkResponse::SavedFeeds(Err(e)) => bsky_log::log!("worker: SavedFeeds err: {e}"),
+        WorkResponse::Image { url, bytes: Err(e) } => {
+            bsky_log::log!("worker: Image({url}) err: {e}")
+        }
+        WorkResponse::PostCreated(Err(e)) => bsky_log::log!("worker: PostCreated err: {e}"),
+        WorkResponse::LikeChanged(Err(e)) => bsky_log::log!("worker: LikeChanged err: {e}"),
+        WorkResponse::RepostChanged(Err(e)) => {
+            bsky_log::log!("worker: RepostChanged err: {e}")
+        }
+        WorkResponse::FollowChanged(Err(e)) => {
+            bsky_log::log!("worker: FollowChanged err: {e}")
+        }
+        WorkResponse::Thread(Err(e)) => bsky_log::log!("worker: Thread err: {e}"),
+        WorkResponse::Notifications(Err(e)) => {
+            bsky_log::log!("worker: Notifications err: {e}")
+        }
+        WorkResponse::SearchActors(Err(e)) => {
+            bsky_log::log!("worker: SearchActors err: {e}")
+        }
+        WorkResponse::SearchPosts(Err(e)) => {
+            bsky_log::log!("worker: SearchPosts err: {e}")
+        }
+        _ => {}
+    }
 }
 
 fn handle_request(client: &AuthClient, req: WorkRequest) -> WorkResponse {
@@ -415,7 +452,7 @@ fn handle_request(client: &AuthClient, req: WorkRequest) -> WorkResponse {
             if let Err(e) =
                 block_on(client.agent.api.app.bsky.notification.update_seen(input))
             {
-                eprintln!("update_seen failed: {e}");
+                bsky_log::log!("update_seen failed: {e}");
             }
             // Reuse Notifications response just to fit the WorkResponse
             // shape; the inner Ok with empty batch carries no data.
@@ -620,7 +657,7 @@ fn fetch_saved_feeds(client: &AuthClient) -> WorkResponse {
                 }
             }
             Err(e) => {
-                eprintln!(
+                bsky_log::log!(
                     "get_feed_generators failed: {e} — pills will use AT-URI fallbacks"
                 );
             }
