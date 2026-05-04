@@ -70,6 +70,17 @@ fn main() {
             None
         }
     };
+    let avatar_mask_field: Option<Texture> =
+        match Texture::from_png_file("app0:avatar_mask_field_96.png") {
+            Ok(t) => Some(t),
+            Err(e) => {
+                eprintln!(
+                    "avatar mask (field-bg) load failed ({e}); selected-row avatars will \
+                     render as squares"
+                );
+                None
+            }
+        };
 
     let mut pad = Pad::init();
     let touch = Touch::init();
@@ -99,6 +110,7 @@ fn main() {
             emoji: emoji_atlas.as_ref(),
             texture_cache: &texture_cache,
             avatar_mask: avatar_mask.as_ref(),
+            avatar_mask_field: avatar_mask_field.as_ref(),
         };
 
         // Render + collect transition action. The Frame's Drop happens

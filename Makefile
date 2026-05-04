@@ -121,7 +121,10 @@ push-mask:
 	curl -sS --connect-timeout 5 --max-time 30 \
 		-T app/static/avatar_mask_96.png \
 		"ftp://$$VITA_IP:1337/ux0:/app/$(TITLE_ID)/avatar_mask_96.png"
-	@echo "avatar_mask_96.png pushed."
+	curl -sS --connect-timeout 5 --max-time 30 \
+		-T app/static/avatar_mask_field_96.png \
+		"ftp://$$VITA_IP:1337/ux0:/app/$(TITLE_ID)/avatar_mask_field_96.png"
+	@echo "avatar masks pushed (BG + FIELD_BG)."
 
 # Library crates have no Vita-specific config and default to the host triple.
 # The bin crate (bsky-vita-app) is target-locked to Vita and excluded here.

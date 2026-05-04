@@ -521,6 +521,7 @@ impl Screen for TimelineScreen {
                         ctx.emoji,
                         ctx.texture_cache,
                         ctx.avatar_mask,
+                        ctx.avatar_mask_field,
                         self.selected_idx,
                     );
                     if self.fetching_more {
@@ -771,6 +772,8 @@ impl Screen for TimelineScreen {
             }
             // Thread responses belong to ThreadScreen.
             WorkResponse::Thread(_) => {}
+            // Follow responses belong to ProfileScreen.
+            WorkResponse::FollowChanged(_) => {}
         }
     }
 }
@@ -804,6 +807,7 @@ fn draw_post_list(
     emoji: Option<&EmojiAtlas>,
     cache: &TextureCache,
     avatar_mask: Option<&Texture>,
+    avatar_mask_field: Option<&Texture>,
     selected_idx: usize,
 ) {
     let mut y = HEADER_H - scroll_y as i32;
@@ -819,6 +823,7 @@ fn draw_post_list(
                 emoji,
                 cache,
                 avatar_mask,
+                avatar_mask_field,
                 i == selected_idx,
             );
         }
@@ -830,6 +835,11 @@ fn draw_post_list(
 /// full screen-width column with `ROW_PAD_X` margin on each side.
 /// `is_selected` lights up a left-edge ACCENT bar to indicate keyboard
 /// focus.
+///
+/// Two avatar masks: `avatar_mask` is composited on unselected rows
+/// (BACKGROUND-color corners); `avatar_mask_field` on selected rows
+/// (FIELD_BG-color corners). The matching corner color makes the
+/// circular illusion seamless across both states.
 pub(crate) fn draw_post_row(
     frame: &mut Frame,
     font: &Font,
@@ -839,6 +849,7 @@ pub(crate) fn draw_post_row(
     emoji: Option<&EmojiAtlas>,
     cache: &TextureCache,
     avatar_mask: Option<&Texture>,
+    avatar_mask_field: Option<&Texture>,
     is_selected: bool,
 ) {
     let row_right = SCREEN_WIDTH;
@@ -846,7 +857,9 @@ pub(crate) fn draw_post_row(
     let inner_w = row_right - inner_left - ROW_PAD_X;
 
     // Selection highlight: faint background tint over the row + 3 px
-    // ACCENT-color bar on the left edge.
+    // ACCENT-color bar on the left edge. The avatar's circular mask
+    // has TWO baked variants (BACKGROUND-corner + FIELD_BG-corner) so
+    // it composites correctly over both selected and unselected rows.
     if is_selected {
         frame.fill_rect(
             0.0,
@@ -874,6 +887,11 @@ pub(crate) fn draw_post_row(
         .display_name
         .as_deref()
         .filter(|s| !s.is_empty());
+    let mask_for_row = if is_selected {
+        avatar_mask_field
+    } else {
+        avatar_mask
+    };
     draw_avatar(
         frame,
         font,
@@ -884,7 +902,7 @@ pub(crate) fn draw_post_row(
         avatar_y,
         AVATAR_SIZE,
         cache,
-        avatar_mask,
+        mask_for_row,
     );
 
     // Top line: display name (left) + @handle (right, muted).

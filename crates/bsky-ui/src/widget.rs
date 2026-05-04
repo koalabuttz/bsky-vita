@@ -68,6 +68,10 @@ pub struct UiCtx<'a> {
     /// avatars without GXM-direct shader work. `None` if the asset is
     /// missing — avatars then render as squares.
     pub avatar_mask: Option<&'a Texture>,
+    /// Same as `avatar_mask` but with FIELD_BG corners — used when
+    /// the row underneath is highlighted with the FIELD_BG selection
+    /// tint (matching corner colors so the mask blends invisibly).
+    pub avatar_mask_field: Option<&'a Texture>,
 }
 
 #[derive(Default)]

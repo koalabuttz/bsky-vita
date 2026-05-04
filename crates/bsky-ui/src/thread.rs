@@ -31,8 +31,13 @@ use bsky_worker::{ReplyTarget, WorkRequest, WorkResponse};
 
 use crate::cdn::avatar_thumbnail_jpeg;
 use crate::compose::ComposeScreen;
+use crate::profile::ProfileScreen;
 use crate::screen::{Screen, ScreenAction};
-use crate::timeline::{self, draw_post_row, measure_post_row, EngagementKind};
+use crate::timeline::{
+    self, draw_post_row, measure_post_row, EngagementKind, AVATAR_SIZE, ROW_PAD_X, ROW_PAD_Y,
+    TEXT_LEFT,
+};
+use crate::widget::Rect;
 
 const HEADER_H: i32 = 40;
 
@@ -224,6 +229,44 @@ impl Screen for ThreadScreen {
         }
         self.scroll_y = self.scroll_y.clamp(0.0, max_scroll);
 
+        // Tap detection: author region → Push ProfileScreen for that
+        // actor. Same hit-test pattern as TimelineScreen but operating
+        // on the parent + main + replies list. Accumulates a tap
+        // result outside the immutable post borrow, then applies after.
+        if !ctx.touches.is_empty() {
+            let touches: Vec<_> = ctx.touches.iter().map(|t| (t.x, t.y)).collect();
+            let mut author_tap: Option<String> = None;
+            if let ThreadState::Loaded { posts, .. } = &self.state {
+                let mut y_probe = HEADER_H - self.scroll_y as i32;
+                for (post, &row_h) in posts.iter().zip(self.row_heights.iter()) {
+                    let row_bottom = y_probe + row_h;
+                    if row_bottom > HEADER_H && y_probe < SCREEN_HEIGHT {
+                        let author_rect = Rect::new(
+                            0.0,
+                            (y_probe + ROW_PAD_Y) as f32,
+                            TEXT_LEFT as f32,
+                            AVATAR_SIZE as f32,
+                        );
+                        if touches.iter().any(|&(x, y)| author_rect.contains(x, y)) {
+                            author_tap =
+                                Some(post.post.author.handle.as_str().to_string());
+                            break;
+                        }
+                    }
+                    y_probe += row_h;
+                }
+            }
+            if let Some(handle) = author_tap {
+                return ScreenAction::Push(Box::new(ProfileScreen::new(
+                    Arc::clone(&self.client),
+                    Some(handle),
+                )));
+            }
+        }
+        // Suppress unused-import lint when ROW_PAD_X is referenced only
+        // indirectly via TEXT_LEFT.
+        let _ = ROW_PAD_X;
+
         // Avatar dispatch for visible posts.
         if let ThreadState::Loaded { posts, .. } = &self.state {
             if let Some(worker) = ctx.worker {
@@ -284,6 +327,7 @@ impl Screen for ThreadScreen {
                             ctx.emoji,
                             ctx.texture_cache,
                             ctx.avatar_mask,
+                            ctx.avatar_mask_field,
                             i == self.selected_idx,
                         );
                     }
@@ -374,7 +418,8 @@ impl Screen for ThreadScreen {
             WorkResponse::Image { url, .. } => {
                 self.inflight_avatars.remove(&url);
             }
-            // Everything else: not for us.
+            // Everything else (Profile, FollowChanged, PostCreated,
+            // delete-acks, errors) is not for us.
             _ => {}
         }
     }

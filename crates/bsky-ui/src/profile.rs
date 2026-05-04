@@ -22,7 +22,7 @@ use bsky_worker::{WorkRequest, WorkResponse};
 use crate::cdn::avatar_thumbnail_jpeg;
 use crate::screen::{Screen, ScreenAction};
 use crate::tabbar::{TabBar, TopLevel};
-use crate::widget::UiCtx;
+use crate::widget::{button, ButtonState, Rect, UiCtx};
 
 const AVATAR_SIZE: i32 = 96;
 
@@ -53,6 +53,9 @@ pub struct ProfileScreen {
     /// pushed-sub-screen instances with `actor: Some(_)` skip rendering
     /// it because they're below the tab bar in the navigation stack).
     tab_bar: TabBar,
+    /// Tap state for the Follow / Unfollow button (rendered only when
+    /// `actor.is_some()`, i.e. viewing somebody else's profile).
+    follow_btn: ButtonState,
 }
 
 impl ProfileScreen {
@@ -66,12 +69,61 @@ impl ProfileScreen {
             dispatched: false,
             inflight_avatar: None,
             tab_bar: TabBar::new(TopLevel::Profile),
+            follow_btn: ButtonState::default(),
         }
     }
 
     /// True if this is the user's own-profile (top-level) instance.
     fn is_own(&self) -> bool {
         self.actor.is_none()
+    }
+
+    /// Optimistically toggle the follow state of the displayed actor +
+    /// dispatch the CreateFollow / DeleteFollow worker request. Local
+    /// state updates IMMEDIATELY so the button label flips on tap; the
+    /// real URI replaces our `PENDING_URI` sentinel on response.
+    fn toggle_follow(&mut self, ctx: &UiCtx) {
+        let Some(worker) = ctx.worker else { return };
+        let ProfileState::Loaded(p) = &mut self.state else { return };
+        // Always need the target's DID — server requires the resolved
+        // identifier; the user might have entered a handle but the
+        // profile response carries the resolved DID.
+        let actor_did = p.did.to_string();
+        let viewer = match p.viewer.as_mut() {
+            Some(v) => v,
+            None => {
+                use atrium_api::app::bsky::actor::defs::ViewerStateData;
+                p.viewer = Some(
+                    ViewerStateData {
+                        activity_subscription: None,
+                        blocked_by: None,
+                        blocking: None,
+                        blocking_by_list: None,
+                        followed_by: None,
+                        following: None,
+                        known_followers: None,
+                        muted: None,
+                        muted_by_list: None,
+                    }
+                    .into(),
+                );
+                p.viewer.as_mut().expect("just initialized")
+            }
+        };
+        if let Some(existing) = viewer.following.take() {
+            if existing == crate::timeline::PENDING_URI {
+                // Optimistic create still in flight — drop the unfollow.
+                return;
+            }
+            let Some(rkey) = existing.rsplit('/').next().map(String::from) else {
+                viewer.following = Some(existing);
+                return;
+            };
+            worker.send(WorkRequest::DeleteFollow { rkey });
+        } else {
+            viewer.following = Some(crate::timeline::PENDING_URI.to_string());
+            worker.send(WorkRequest::CreateFollow { actor_did });
+        }
     }
 }
 
@@ -116,6 +168,7 @@ impl Screen for ProfileScreen {
             }
         }
 
+        let mut toggle_follow_clicked = false;
         match &self.state {
             ProfileState::Pending => {
                 frame.draw_text_centered(
@@ -130,6 +183,33 @@ impl Screen for ProfileScreen {
                 draw_profile(frame, font, p, ctx.texture_cache, ctx.avatar_mask);
                 if self.is_own() {
                     draw_session_footer(frame, font, &self.client);
+                } else {
+                    // Follow / Unfollow button on other actors' profiles.
+                    let following = p
+                        .viewer
+                        .as_ref()
+                        .and_then(|v| v.following.as_deref())
+                        .is_some();
+                    let label = if following { "Unfollow" } else { "Follow" };
+                    let btn_w = 160.0;
+                    let btn_rect = Rect::new(
+                        (SCREEN_WIDTH as f32 - btn_w) / 2.0,
+                        395.0,
+                        btn_w,
+                        48.0,
+                    );
+                    let clicked = button(
+                        frame,
+                        font,
+                        btn_rect,
+                        label,
+                        &mut self.follow_btn,
+                        ctx,
+                        true,
+                    );
+                    if clicked {
+                        toggle_follow_clicked = true;
+                    }
                 }
             }
             ProfileState::Error(msg) => {
@@ -148,6 +228,12 @@ impl Screen for ProfileScreen {
                     msg,
                 );
             }
+        }
+
+        // Apply Follow / Unfollow toggle outside the match so the
+        // borrow on `self.state` ends first.
+        if toggle_follow_clicked {
+            self.toggle_follow(ctx);
         }
 
         // Top-level (own profile) renders the tab bar and treats CIRCLE
@@ -189,6 +275,18 @@ impl Screen for ProfileScreen {
             WorkResponse::PostCreated(_) => {}
             WorkResponse::LikeChanged(_) | WorkResponse::RepostChanged(_) => {}
             WorkResponse::Thread(_) => {}
+            WorkResponse::FollowChanged(Ok(Some(uri))) => {
+                if let ProfileState::Loaded(p) = &mut self.state {
+                    if let Some(viewer) = p.viewer.as_mut() {
+                        if viewer.following.as_deref() == Some(crate::timeline::PENDING_URI) {
+                            viewer.following = Some(uri);
+                        }
+                    }
+                }
+            }
+            WorkResponse::FollowChanged(_) => {
+                // Delete acks (Ok(None)) and errors land here; no-op.
+            }
         }
     }
 }

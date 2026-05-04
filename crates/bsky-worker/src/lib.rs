@@ -49,8 +49,9 @@ use atrium_api::app::bsky::feed::get_timeline;
 use atrium_api::app::bsky::feed::like::RecordData as LikeRecordData;
 use atrium_api::app::bsky::feed::post::{RecordData as PostRecordData, ReplyRefData};
 use atrium_api::app::bsky::feed::repost::RecordData as RepostRecordData;
+use atrium_api::app::bsky::graph::follow::RecordData as FollowRecordData;
 use atrium_api::com::atproto::repo::{create_record, delete_record};
-use atrium_api::types::string::{AtIdentifier, Datetime, Nsid, RecordKey};
+use atrium_api::types::string::{AtIdentifier, Datetime, Did, Nsid, RecordKey};
 use atrium_api::types::{LimitedNonZeroU8, LimitedU16, Union, Unknown};
 use atrium_xrpc::http::Request;
 use atrium_xrpc::HttpClient;
@@ -100,6 +101,11 @@ pub enum WorkRequest {
     /// includes parent ancestors (oldest-first), the main post, and
     /// direct replies.
     FetchThread { uri: String },
+    /// Follow an actor (collection `app.bsky.graph.follow`). Subject
+    /// is the target actor's DID.
+    CreateFollow { actor_did: String },
+    /// Unfollow by record-key (extracted from the follow's AT-URI).
+    DeleteFollow { rkey: String },
 }
 
 /// Minimal data the caller provides for a reply. The worker translates
@@ -161,6 +167,9 @@ pub enum WorkResponse {
     LikeChanged(Result<Option<String>, String>),
     /// Same shape as `LikeChanged`, for repost create/delete.
     RepostChanged(Result<Option<String>, String>),
+    /// `Ok(Some(uri))` for CreateFollow; `Ok(None)` for DeleteFollow;
+    /// `Err` for either.
+    FollowChanged(Result<Option<String>, String>),
     Thread(Result<ThreadBatch, String>),
 }
 
@@ -311,6 +320,87 @@ fn handle_request(client: &AuthClient, req: WorkRequest) -> WorkResponse {
             delete_engagement_record(client, "app.bsky.feed.repost", &rkey, false)
         }
         WorkRequest::FetchThread { uri } => fetch_thread(client, uri),
+        WorkRequest::CreateFollow { actor_did } => create_follow(client, actor_did),
+        WorkRequest::DeleteFollow { rkey } => delete_follow(client, &rkey),
+    }
+}
+
+/// Create an `app.bsky.graph.follow` record targeting `actor_did`.
+fn create_follow(client: &AuthClient, actor_did: String) -> WorkResponse {
+    let did_str = match block_on(client.agent.did()) {
+        Some(d) => d.to_string(),
+        None => return WorkResponse::FollowChanged(Err("no session DID".into())),
+    };
+    let repo = match AtIdentifier::from_str(&did_str) {
+        Ok(id) => id,
+        Err(e) => return WorkResponse::FollowChanged(Err(format!("DID parse: {e}"))),
+    };
+    let subject = match Did::from_str(&actor_did) {
+        Ok(d) => d,
+        Err(e) => return WorkResponse::FollowChanged(Err(format!("actor DID parse: {e}"))),
+    };
+    let mut json = match serde_json::to_value(FollowRecordData {
+        created_at: Datetime::now(),
+        subject,
+    }) {
+        Ok(v) => v,
+        Err(e) => return WorkResponse::FollowChanged(Err(format!("serialize: {e}"))),
+    };
+    if let serde_json::Value::Object(map) = &mut json {
+        map.insert(
+            "$type".to_string(),
+            serde_json::Value::String("app.bsky.graph.follow".to_string()),
+        );
+    }
+    let unknown: Unknown = match serde_json::from_value(json) {
+        Ok(u) => u,
+        Err(e) => return WorkResponse::FollowChanged(Err(format!("re-deserialize: {e}"))),
+    };
+    let collection = match Nsid::from_str("app.bsky.graph.follow") {
+        Ok(n) => n,
+        Err(e) => return WorkResponse::FollowChanged(Err(format!("nsid: {e}"))),
+    };
+    let input = create_record::InputData {
+        collection,
+        record: unknown,
+        repo,
+        rkey: None,
+        swap_commit: None,
+        validate: None,
+    };
+    match block_on(client.agent.api.com.atproto.repo.create_record(input.into())) {
+        Ok(o) => WorkResponse::FollowChanged(Ok(Some(o.data.uri))),
+        Err(e) => WorkResponse::FollowChanged(Err(format!("{e}"))),
+    }
+}
+
+fn delete_follow(client: &AuthClient, rkey_str: &str) -> WorkResponse {
+    let did_str = match block_on(client.agent.did()) {
+        Some(d) => d.to_string(),
+        None => return WorkResponse::FollowChanged(Err("no session DID".into())),
+    };
+    let repo = match AtIdentifier::from_str(&did_str) {
+        Ok(id) => id,
+        Err(e) => return WorkResponse::FollowChanged(Err(format!("DID parse: {e}"))),
+    };
+    let collection = match Nsid::from_str("app.bsky.graph.follow") {
+        Ok(n) => n,
+        Err(e) => return WorkResponse::FollowChanged(Err(format!("nsid: {e}"))),
+    };
+    let rkey = match RecordKey::from_str(rkey_str) {
+        Ok(k) => k,
+        Err(e) => return WorkResponse::FollowChanged(Err(format!("rkey: {e}"))),
+    };
+    let input = delete_record::InputData {
+        collection,
+        repo,
+        rkey,
+        swap_commit: None,
+        swap_record: None,
+    };
+    match block_on(client.agent.api.com.atproto.repo.delete_record(input.into())) {
+        Ok(_) => WorkResponse::FollowChanged(Ok(None)),
+        Err(e) => WorkResponse::FollowChanged(Err(format!("{e}"))),
     }
 }
 
