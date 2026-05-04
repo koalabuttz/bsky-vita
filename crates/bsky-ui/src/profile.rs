@@ -188,6 +188,7 @@ impl Screen for ProfileScreen {
             }
             WorkResponse::PostCreated(_) => {}
             WorkResponse::LikeChanged(_) | WorkResponse::RepostChanged(_) => {}
+            WorkResponse::Thread(_) => {}
         }
     }
 }

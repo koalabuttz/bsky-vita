@@ -40,14 +40,18 @@ use std::str::FromStr;
 
 use atrium_api::app::bsky::actor::defs::ProfileViewDetailedData;
 use atrium_api::app::bsky::actor::get_profile;
-use atrium_api::app::bsky::feed::defs::FeedViewPost;
+use atrium_api::app::bsky::feed::defs::{
+    FeedViewPost, PostView, ThreadViewPostParentRefs, ThreadViewPostRepliesItem,
+};
+use atrium_api::app::bsky::feed::get_post_thread;
+use atrium_api::app::bsky::feed::get_post_thread::OutputThreadRefs;
 use atrium_api::app::bsky::feed::get_timeline;
 use atrium_api::app::bsky::feed::like::RecordData as LikeRecordData;
 use atrium_api::app::bsky::feed::post::{RecordData as PostRecordData, ReplyRefData};
 use atrium_api::app::bsky::feed::repost::RecordData as RepostRecordData;
 use atrium_api::com::atproto::repo::{create_record, delete_record};
 use atrium_api::types::string::{AtIdentifier, Datetime, Nsid, RecordKey};
-use atrium_api::types::{LimitedNonZeroU8, Unknown};
+use atrium_api::types::{LimitedNonZeroU8, LimitedU16, Union, Unknown};
 use atrium_xrpc::http::Request;
 use atrium_xrpc::HttpClient;
 use bsky_auth::AuthClient;
@@ -91,6 +95,11 @@ pub enum WorkRequest {
     CreateRepost { post_uri: String, post_cid: String },
     /// Delete a repost by record-key.
     DeleteRepost { rkey: String },
+    /// Fetch a post's thread via `app.bsky.feed.getPostThread`. The
+    /// `uri` is the AT-URI of any post in the thread; the response
+    /// includes parent ancestors (oldest-first), the main post, and
+    /// direct replies.
+    FetchThread { uri: String },
 }
 
 /// Minimal data the caller provides for a reply. The worker translates
@@ -116,6 +125,21 @@ pub struct TimelineBatch {
     pub cursor: Option<String>,
 }
 
+/// A flattened thread view — ancestors above the focus (oldest first),
+/// the focused post itself, and direct replies. Phase 4.4 MVP: replies
+/// are first-level only (no nested reply rendering); future phases
+/// can recurse.
+pub struct ThreadBatch {
+    /// Ancestors of `main`, in oldest → newest order. The first entry
+    /// is the thread's root; the last entry is the parent of `main`.
+    /// Empty if `main` is itself the root.
+    pub parents: Vec<PostView>,
+    /// The post the user tapped on (the "focus" of the thread).
+    pub main: PostView,
+    /// Direct replies to `main`.
+    pub replies: Vec<PostView>,
+}
+
 /// A completed work item. Each variant's payload mirrors the request that
 /// produced it, with a `Result` because every PDS call can fail.
 pub enum WorkResponse {
@@ -137,6 +161,7 @@ pub enum WorkResponse {
     LikeChanged(Result<Option<String>, String>),
     /// Same shape as `LikeChanged`, for repost create/delete.
     RepostChanged(Result<Option<String>, String>),
+    Thread(Result<ThreadBatch, String>),
 }
 
 /// Handle to the worker thread. Holds the channel ends and the thread's
@@ -285,6 +310,71 @@ fn handle_request(client: &AuthClient, req: WorkRequest) -> WorkResponse {
         WorkRequest::DeleteRepost { rkey } => {
             delete_engagement_record(client, "app.bsky.feed.repost", &rkey, false)
         }
+        WorkRequest::FetchThread { uri } => fetch_thread(client, uri),
+    }
+}
+
+/// Fetch a post's thread + flatten into a `ThreadBatch`.
+fn fetch_thread(client: &AuthClient, uri: String) -> WorkResponse {
+    let params = get_post_thread::ParametersData {
+        depth: LimitedU16::<1000>::try_from(2).ok(),
+        parent_height: LimitedU16::<1000>::try_from(10).ok(),
+        uri,
+    }
+    .into();
+    match block_on(client.agent.api.app.bsky.feed.get_post_thread(params)) {
+        Ok(o) => match o.data.thread {
+            Union::Refs(OutputThreadRefs::AppBskyFeedDefsThreadViewPost(view)) => {
+                let main = view.post.clone();
+                let mut parents = Vec::new();
+                walk_parents(&view, &mut parents);
+                parents.reverse();
+                let replies: Vec<PostView> = view
+                    .replies
+                    .as_ref()
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| match item {
+                                Union::Refs(ThreadViewPostRepliesItem::ThreadViewPost(
+                                    child,
+                                )) => Some(child.post.clone()),
+                                _ => None,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                WorkResponse::Thread(Ok(ThreadBatch {
+                    parents,
+                    main,
+                    replies,
+                }))
+            }
+            Union::Refs(OutputThreadRefs::AppBskyFeedDefsNotFoundPost(_)) => {
+                WorkResponse::Thread(Err("post not found".into()))
+            }
+            Union::Refs(OutputThreadRefs::AppBskyFeedDefsBlockedPost(_)) => {
+                WorkResponse::Thread(Err("post is blocked".into()))
+            }
+            Union::Unknown(_) => {
+                WorkResponse::Thread(Err("unsupported thread variant".into()))
+            }
+        },
+        Err(e) => WorkResponse::Thread(Err(format!("{e}"))),
+    }
+}
+
+/// Walk the parent chain of a `ThreadViewPost` and push each ancestor
+/// into `out` (newest-first; caller reverses for oldest-first).
+fn walk_parents(
+    view: &atrium_api::app::bsky::feed::defs::ThreadViewPost,
+    out: &mut Vec<PostView>,
+) {
+    if let Some(Union::Refs(ThreadViewPostParentRefs::ThreadViewPost(parent))) =
+        view.parent.as_ref()
+    {
+        out.push(parent.post.clone());
+        walk_parents(parent, out);
     }
 }
 

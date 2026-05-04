@@ -42,6 +42,7 @@ use crate::compose::ComposeScreen;
 use crate::profile::ProfileScreen;
 use crate::screen::{Screen, ScreenAction};
 use crate::tabbar::{TabBar, TopLevel, TAB_BAR_HEIGHT};
+use crate::thread::ThreadScreen;
 use crate::widget::{Rect, UiCtx};
 
 /// Sticky header height (px). Posts render below this; the header is
@@ -55,23 +56,23 @@ const VIEWPORT_BOTTOM: i32 = SCREEN_HEIGHT - TAB_BAR_HEIGHT;
 const VIEWPORT_H: i32 = VIEWPORT_BOTTOM - VIEWPORT_TOP;
 
 /// Side margins inside a post row.
-const ROW_PAD_X: i32 = 16;
+pub(crate) const ROW_PAD_X: i32 = 16;
 /// Avatar dimensions in the timeline post row.
-const AVATAR_SIZE: i32 = 48;
+pub(crate) const AVATAR_SIZE: i32 = 48;
 /// Where text starts inside a row, accounting for the avatar slot:
 /// ROW_PAD_X (left margin) + AVATAR_SIZE + 8 px gutter.
-const TEXT_LEFT: i32 = ROW_PAD_X + AVATAR_SIZE + 8;
+pub(crate) const TEXT_LEFT: i32 = ROW_PAD_X + AVATAR_SIZE + 8;
 /// Vertical padding inside a row (above display name, below counts).
 /// 20 px clears the ascender of 20 px text (ascender ~15–16 px above
 /// baseline), preventing letter tops from overlapping the previous
 /// row's separator. Was 12 in the PGF era.
-const ROW_PAD_Y: i32 = 20;
+pub(crate) const ROW_PAD_Y: i32 = 20;
 /// Gap between display-name row and post body.
-const TOP_LINE_H: i32 = 24;
+pub(crate) const TOP_LINE_H: i32 = 24;
 /// Gap between post body and counts row.
-const BODY_GAP: i32 = 8;
+pub(crate) const BODY_GAP: i32 = 8;
 /// Counts row height + bottom padding + separator gap.
-const FOOTER_H: i32 = 28;
+pub(crate) const FOOTER_H: i32 = 28;
 
 /// Pixels per d-pad press.
 const DPAD_STEP: f32 = 80.0;
@@ -212,7 +213,7 @@ fn first_visible_idx(row_heights: &[i32], scroll_y: i32) -> usize {
 }
 
 #[derive(Copy, Clone)]
-enum EngagementKind {
+pub(crate) enum EngagementKind {
     Like,
     Repost,
 }
@@ -222,6 +223,7 @@ enum EngagementKind {
 /// finishes (mutable borrow of `self`).
 enum TapAction {
     OpenProfile(String),
+    OpenThread(String),
     ToggleLike(usize),
     ToggleRepost(usize),
 }
@@ -230,12 +232,12 @@ enum TapAction {
 /// The real AT-URI replaces it on `LikeChanged(Ok(Some(uri)))` /
 /// `RepostChanged(Ok(Some(uri)))` so subsequent un-like / un-repost
 /// can extract the rkey.
-const PENDING_URI: &str = "__pending__";
+pub(crate) const PENDING_URI: &str = "__pending__";
 
 /// Apply optimistic toggle + dispatch the matching Create/Delete worker
 /// request. If `kind == Like`, mutates `viewer.like` + `like_count`;
 /// `Repost` mutates `viewer.repost` + `repost_count`.
-fn toggle_engagement(
+pub(crate) fn toggle_engagement(
     post: &mut FeedViewPost,
     worker: &bsky_worker::Worker,
     kind: EngagementKind,
@@ -634,6 +636,19 @@ impl Screen for TimelineScreen {
                             tap_action = Some(TapAction::ToggleRepost(idx));
                             break;
                         }
+                        // Body region: anywhere in the row that isn't
+                        // the author region or the counts row → open
+                        // thread for that post.
+                        let body_rect = Rect::new(
+                            TEXT_LEFT as f32,
+                            (y_probe + ROW_PAD_Y) as f32,
+                            (SCREEN_WIDTH - TEXT_LEFT - ROW_PAD_X) as f32,
+                            (row_h - ROW_PAD_Y - FOOTER_H) as f32,
+                        );
+                        if touches.iter().any(|&(x, y)| body_rect.contains(x, y)) {
+                            tap_action = Some(TapAction::OpenThread(post.post.uri.clone()));
+                            break;
+                        }
                     }
                     y_probe += row_h;
                 }
@@ -643,6 +658,12 @@ impl Screen for TimelineScreen {
                     return ScreenAction::Push(Box::new(ProfileScreen::new(
                         Arc::clone(&self.client),
                         Some(handle),
+                    )));
+                }
+                Some(TapAction::OpenThread(uri)) => {
+                    return ScreenAction::Push(Box::new(ThreadScreen::new(
+                        Arc::clone(&self.client),
+                        uri,
                     )));
                 }
                 Some(TapAction::ToggleLike(idx)) => {
@@ -748,13 +769,15 @@ impl Screen for TimelineScreen {
             WorkResponse::LikeChanged(_) | WorkResponse::RepostChanged(_) => {
                 // Delete acks (Ok(None)) and errors land here; no-op.
             }
+            // Thread responses belong to ThreadScreen.
+            WorkResponse::Thread(_) => {}
         }
     }
 }
 
 /// Compute one post row's total height (without drawing). Mirrors the
 /// layout in [`draw_post_row`].
-fn measure_post_row(
+pub(crate) fn measure_post_row(
     frame: &Frame,
     font: &Font,
     post: &FeedViewPost,
@@ -807,7 +830,7 @@ fn draw_post_list(
 /// full screen-width column with `ROW_PAD_X` margin on each side.
 /// `is_selected` lights up a left-edge ACCENT bar to indicate keyboard
 /// focus.
-fn draw_post_row(
+pub(crate) fn draw_post_row(
     frame: &mut Frame,
     font: &Font,
     post: &FeedViewPost,
@@ -945,7 +968,7 @@ fn draw_post_row(
 /// or a non-post record served accidentally). For 3.2 we render an
 /// empty body in that case; 3.x polish can add a "[unsupported post]"
 /// placeholder if we observe it in the wild.
-fn extract_post_text(record: &Unknown) -> Option<String> {
+pub(crate) fn extract_post_text(record: &Unknown) -> Option<String> {
     use atrium_api::app::bsky::feed::post::RecordData;
     RecordData::try_from_unknown(record.clone()).ok().map(|r| r.text)
 }
