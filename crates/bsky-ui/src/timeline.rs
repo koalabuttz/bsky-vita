@@ -774,6 +774,8 @@ impl Screen for TimelineScreen {
             WorkResponse::Thread(_) => {}
             // Follow responses belong to ProfileScreen.
             WorkResponse::FollowChanged(_) => {}
+            // Notifications belong to NotificationsScreen.
+            WorkResponse::Notifications(_) => {}
         }
     }
 }

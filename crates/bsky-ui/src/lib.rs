@@ -3,6 +3,7 @@
 pub mod cdn;
 pub mod compose;
 pub mod login;
+pub mod notifications;
 pub mod profile;
 pub mod screen;
 pub mod tabbar;
@@ -12,6 +13,7 @@ pub mod widget;
 
 pub use compose::ComposeScreen;
 pub use login::LoginScreen;
+pub use notifications::NotificationsScreen;
 pub use profile::ProfileScreen;
 pub use screen::{Screen, ScreenAction};
 pub use tabbar::{TabBar, TopLevel};

@@ -50,6 +50,9 @@ use atrium_api::app::bsky::feed::like::RecordData as LikeRecordData;
 use atrium_api::app::bsky::feed::post::{RecordData as PostRecordData, ReplyRefData};
 use atrium_api::app::bsky::feed::repost::RecordData as RepostRecordData;
 use atrium_api::app::bsky::graph::follow::RecordData as FollowRecordData;
+use atrium_api::app::bsky::notification::list_notifications;
+use atrium_api::app::bsky::notification::list_notifications::Notification;
+use atrium_api::app::bsky::notification::update_seen;
 use atrium_api::com::atproto::repo::{create_record, delete_record};
 use atrium_api::types::string::{AtIdentifier, Datetime, Did, Nsid, RecordKey};
 use atrium_api::types::{LimitedNonZeroU8, LimitedU16, Union, Unknown};
@@ -106,6 +109,13 @@ pub enum WorkRequest {
     CreateFollow { actor_did: String },
     /// Unfollow by record-key (extracted from the follow's AT-URI).
     DeleteFollow { rkey: String },
+    /// Fetch a page of the user's notifications via
+    /// `app.bsky.notification.listNotifications`.
+    FetchNotifications { cursor: Option<String> },
+    /// Mark notifications as seen up to `seen_at`. Fire-and-forget; we
+    /// don't surface a response variant since failure is non-fatal
+    /// (server tracks read state independently).
+    MarkSeen { seen_at: Datetime },
 }
 
 /// Minimal data the caller provides for a reply. The worker translates
@@ -128,6 +138,12 @@ pub struct ReplyTarget {
 /// None` means we've reached the end of the feed.
 pub struct TimelineBatch {
     pub posts: Vec<FeedViewPost>,
+    pub cursor: Option<String>,
+}
+
+/// One page of notifications + the next-page cursor (None = end).
+pub struct NotificationBatch {
+    pub notifications: Vec<Notification>,
     pub cursor: Option<String>,
 }
 
@@ -171,6 +187,7 @@ pub enum WorkResponse {
     /// `Err` for either.
     FollowChanged(Result<Option<String>, String>),
     Thread(Result<ThreadBatch, String>),
+    Notifications(Result<NotificationBatch, String>),
 }
 
 /// Handle to the worker thread. Holds the channel ends and the thread's
@@ -322,6 +339,50 @@ fn handle_request(client: &AuthClient, req: WorkRequest) -> WorkResponse {
         WorkRequest::FetchThread { uri } => fetch_thread(client, uri),
         WorkRequest::CreateFollow { actor_did } => create_follow(client, actor_did),
         WorkRequest::DeleteFollow { rkey } => delete_follow(client, &rkey),
+        WorkRequest::FetchNotifications { cursor } => fetch_notifications(client, cursor),
+        WorkRequest::MarkSeen { seen_at } => {
+            // Fire-and-forget; the result is logged but not surfaced.
+            let input = update_seen::InputData { seen_at }.into();
+            if let Err(e) =
+                block_on(client.agent.api.app.bsky.notification.update_seen(input))
+            {
+                eprintln!("update_seen failed: {e}");
+            }
+            // Reuse Notifications response just to fit the WorkResponse
+            // shape; the inner Ok with empty batch carries no data.
+            WorkResponse::Notifications(Ok(NotificationBatch {
+                notifications: Vec::new(),
+                cursor: None,
+            }))
+        }
+    }
+}
+
+fn fetch_notifications(client: &AuthClient, cursor: Option<String>) -> WorkResponse {
+    let limit = LimitedNonZeroU8::<100>::try_from(50)
+        .expect("50 fits in LimitedNonZeroU8<100>");
+    let params = list_notifications::ParametersData {
+        cursor,
+        limit: Some(limit),
+        priority: None,
+        reasons: None,
+        seen_at: None,
+    }
+    .into();
+    match block_on(
+        client
+            .agent
+            .api
+            .app
+            .bsky
+            .notification
+            .list_notifications(params),
+    ) {
+        Ok(o) => WorkResponse::Notifications(Ok(NotificationBatch {
+            notifications: o.data.notifications,
+            cursor: o.data.cursor,
+        })),
+        Err(e) => WorkResponse::Notifications(Err(format!("{e}"))),
     }
 }
 

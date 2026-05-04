@@ -287,6 +287,7 @@ impl Screen for ProfileScreen {
             WorkResponse::FollowChanged(_) => {
                 // Delete acks (Ok(None)) and errors land here; no-op.
             }
+            WorkResponse::Notifications(_) => {}
         }
     }
 }

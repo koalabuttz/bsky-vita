@@ -25,7 +25,10 @@ use std::sync::Arc;
 use bsky_auth::AuthClient;
 use bsky_input::{Pad, Touch};
 use bsky_render::{EmojiAtlas, Render, Texture, TextureCache};
-use bsky_ui::{LoginScreen, ProfileScreen, Screen, ScreenAction, TimelineScreen, TopLevel, UiCtx};
+use bsky_ui::{
+    LoginScreen, NotificationsScreen, ProfileScreen, Screen, ScreenAction, TimelineScreen,
+    TopLevel, UiCtx,
+};
 use bsky_worker::{WorkResponse, Worker};
 
 fn main() {
@@ -214,9 +217,10 @@ fn make_top_level(target: TopLevel, client: Arc<AuthClient>) -> Box<dyn Screen> 
     match target {
         TopLevel::Home => Box::new(TimelineScreen::new(client)),
         TopLevel::Profile => Box::new(ProfileScreen::new(client, None)),
-        TopLevel::Search | TopLevel::Notifications => {
-            // TODO: 4.6 NotificationsScreen, 4.7 SearchScreen.
-            eprintln!("{target:?} screen not implemented yet — falling back to Home");
+        TopLevel::Notifications => Box::new(NotificationsScreen::new(client)),
+        TopLevel::Search => {
+            // TODO: 4.7 SearchScreen.
+            eprintln!("Search screen not implemented yet — falling back to Home");
             Box::new(TimelineScreen::new(client))
         }
     }
