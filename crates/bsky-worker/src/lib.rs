@@ -38,8 +38,9 @@ use std::thread::{self, JoinHandle};
 
 use std::str::FromStr;
 
-use atrium_api::app::bsky::actor::defs::ProfileViewDetailedData;
-use atrium_api::app::bsky::actor::get_profile;
+use atrium_api::app::bsky::actor::defs::{ProfileView, ProfileViewDetailedData};
+use atrium_api::app::bsky::actor::{get_profile, search_actors};
+use atrium_api::app::bsky::feed::search_posts;
 use atrium_api::app::bsky::feed::defs::{
     FeedViewPost, PostView, ThreadViewPostParentRefs, ThreadViewPostRepliesItem,
 };
@@ -116,6 +117,16 @@ pub enum WorkRequest {
     /// don't surface a response variant since failure is non-fatal
     /// (server tracks read state independently).
     MarkSeen { seen_at: Datetime },
+    /// Search for actors matching `q`. Cursor-paginated.
+    SearchActors {
+        q: String,
+        cursor: Option<String>,
+    },
+    /// Search for posts matching `q`. Cursor-paginated.
+    SearchPosts {
+        q: String,
+        cursor: Option<String>,
+    },
 }
 
 /// Minimal data the caller provides for a reply. The worker translates
@@ -144,6 +155,18 @@ pub struct TimelineBatch {
 /// One page of notifications + the next-page cursor (None = end).
 pub struct NotificationBatch {
     pub notifications: Vec<Notification>,
+    pub cursor: Option<String>,
+}
+
+/// One page of actor search results.
+pub struct ActorsBatch {
+    pub actors: Vec<ProfileView>,
+    pub cursor: Option<String>,
+}
+
+/// One page of post search results.
+pub struct PostsBatch {
+    pub posts: Vec<PostView>,
     pub cursor: Option<String>,
 }
 
@@ -188,6 +211,8 @@ pub enum WorkResponse {
     FollowChanged(Result<Option<String>, String>),
     Thread(Result<ThreadBatch, String>),
     Notifications(Result<NotificationBatch, String>),
+    SearchActors(Result<ActorsBatch, String>),
+    SearchPosts(Result<PostsBatch, String>),
 }
 
 /// Handle to the worker thread. Holds the channel ends and the thread's
@@ -339,6 +364,8 @@ fn handle_request(client: &AuthClient, req: WorkRequest) -> WorkResponse {
         WorkRequest::FetchThread { uri } => fetch_thread(client, uri),
         WorkRequest::CreateFollow { actor_did } => create_follow(client, actor_did),
         WorkRequest::DeleteFollow { rkey } => delete_follow(client, &rkey),
+        WorkRequest::SearchActors { q, cursor } => search_actors_handler(client, q, cursor),
+        WorkRequest::SearchPosts { q, cursor } => search_posts_handler(client, q, cursor),
         WorkRequest::FetchNotifications { cursor } => fetch_notifications(client, cursor),
         WorkRequest::MarkSeen { seen_at } => {
             // Fire-and-forget; the result is logged but not surfaced.
@@ -355,6 +382,58 @@ fn handle_request(client: &AuthClient, req: WorkRequest) -> WorkResponse {
                 cursor: None,
             }))
         }
+    }
+}
+
+fn search_actors_handler(
+    client: &AuthClient,
+    q: String,
+    cursor: Option<String>,
+) -> WorkResponse {
+    let limit = LimitedNonZeroU8::<100>::try_from(25).expect("25 fits");
+    let params = search_actors::ParametersData {
+        cursor,
+        limit: Some(limit),
+        q: Some(q),
+        term: None,
+    }
+    .into();
+    match block_on(client.agent.api.app.bsky.actor.search_actors(params)) {
+        Ok(o) => WorkResponse::SearchActors(Ok(ActorsBatch {
+            actors: o.data.actors,
+            cursor: o.data.cursor,
+        })),
+        Err(e) => WorkResponse::SearchActors(Err(format!("{e}"))),
+    }
+}
+
+fn search_posts_handler(
+    client: &AuthClient,
+    q: String,
+    cursor: Option<String>,
+) -> WorkResponse {
+    let limit = LimitedNonZeroU8::<100>::try_from(25).expect("25 fits");
+    let params = search_posts::ParametersData {
+        author: None,
+        cursor,
+        domain: None,
+        lang: None,
+        limit: Some(limit),
+        mentions: None,
+        q,
+        since: None,
+        sort: None,
+        tag: None,
+        until: None,
+        url: None,
+    }
+    .into();
+    match block_on(client.agent.api.app.bsky.feed.search_posts(params)) {
+        Ok(o) => WorkResponse::SearchPosts(Ok(PostsBatch {
+            posts: o.data.posts,
+            cursor: o.data.cursor,
+        })),
+        Err(e) => WorkResponse::SearchPosts(Err(format!("{e}"))),
     }
 }
 

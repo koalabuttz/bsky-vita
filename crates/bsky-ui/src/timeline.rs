@@ -776,6 +776,8 @@ impl Screen for TimelineScreen {
             WorkResponse::FollowChanged(_) => {}
             // Notifications belong to NotificationsScreen.
             WorkResponse::Notifications(_) => {}
+            // Search results belong to SearchScreen.
+            WorkResponse::SearchActors(_) | WorkResponse::SearchPosts(_) => {}
         }
     }
 }
