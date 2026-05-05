@@ -232,12 +232,10 @@ impl Screen for VideoPlayerScreen {
                 if let Some(t) = tex.as_ref() {
                     let (sx, sy, dx, dy, dw, dh) =
                         aspect_fit(*tex_w, *tex_h);
-                    // The YUV texture is quarter-resolution
-                    // (Texture::create_yuv420 halves both dims).
-                    // Double the GPU draw scale to fill the same
-                    // on-screen rect; vita2d's bilinear filter
-                    // smooths the upscale.
-                    frame.draw_texture_scale(t, dx, dy, sx * 2.0, sy * 2.0);
+                    // Full-resolution YUV texture; GPU sampler
+                    // does YUV→RGB at sample time. No CPU
+                    // conversion, no upscale — just blit.
+                    frame.draw_texture_scale(t, dx, dy, sx, sy);
                     let _ = (dw, dh);
                 }
                 if self.show_overlay() {

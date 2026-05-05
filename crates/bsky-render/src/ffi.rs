@@ -15,14 +15,43 @@
 
 use core::ffi::{c_char, c_float, c_int, c_uint, c_ulong, c_void};
 
-// `vita2d.h` declares `vita2d_pgf`, `vita2d_pvf`, `vita2d_font`, and
-// `vita2d_texture` as forward-declared structs we never inspect directly.
-// We model them as opaque types (uninhabited enums) — a common Rust idiom
-// for opaque C handles. `*mut vita2d_pgf` is what we pass around.
+// `vita2d.h` declares `vita2d_pgf`, `vita2d_pvf`, `vita2d_font` as
+// forward-declared structs we never inspect directly. Opaque enums
+// suffice for those — `*mut vita2d_pgf` is what we pass around.
 pub enum vita2d_pgf {}
 pub enum vita2d_pvf {}
 pub enum vita2d_font {}
-pub enum vita2d_texture {}
+
+// `vita2d_texture` we DO inspect — Phase 5.3.x builds a YUV-format
+// texture by hand-constructing this struct (sceGxmTextureInitLinear
+// with the YUV format the GPU sampler natively understands, so the
+// hardware does YUV→RGB conversion at sample time). vita2d's
+// `vita2d_create_empty_texture_format` mishandles YUV strides, so
+// we bypass it. Layout mirrors `$VITASDK/arm-vita-eabi/include/
+// vita2d.h:36-44` exactly:
+//
+//   typedef struct vita2d_texture {
+//       SceGxmTexture          gxm_tex;
+//       SceUID                 data_UID;
+//       SceUID                 palette_UID;
+//       SceGxmRenderTarget    *gxm_rtgt;
+//       SceGxmColorSurface     gxm_sfc;
+//       SceGxmDepthStencilSurface gxm_sfd;
+//       SceUID                 depth_UID;
+//   } vita2d_texture;
+//
+// Sizes for the Sce* structs come from vitasdk-sys to guarantee the
+// ABI matches what libvita2d was compiled against.
+#[repr(C)]
+pub struct vita2d_texture {
+    pub gxm_tex: vitasdk_sys::SceGxmTexture,
+    pub data_uid: vitasdk_sys::SceUID,
+    pub palette_uid: vitasdk_sys::SceUID,
+    pub gxm_rtgt: *mut c_void,
+    pub gxm_sfc: vitasdk_sys::SceGxmColorSurface,
+    pub gxm_sfd: vitasdk_sys::SceGxmDepthStencilSurface,
+    pub depth_uid: vitasdk_sys::SceUID,
+}
 
 unsafe extern "C" {
     // Lifecycle
