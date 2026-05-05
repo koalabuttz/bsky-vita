@@ -244,6 +244,7 @@ impl Screen for ThreadScreen {
             enum ThreadTap {
                 OpenProfile(String),
                 OpenThread(String),
+                OpenVideo(crate::embeds::VideoTarget),
             }
             let mut tap: Option<ThreadTap> = None;
             if let ThreadState::Loaded { posts, .. } = &self.state {
@@ -262,6 +263,25 @@ impl Screen for ThreadScreen {
                                 post.post.author.handle.as_str().to_string(),
                             ));
                             break;
+                        }
+                        if let Some(target) = crate::embeds::video_in_embed(
+                            post.post.embed.as_ref(),
+                            post.post.author.did.as_ref(),
+                        ) {
+                            if let Some((ey, eh)) = crate::embeds::embed_rect(
+                                frame, font, post, y_probe, ctx.emoji,
+                            ) {
+                                let er = Rect::new(
+                                    TEXT_LEFT as f32,
+                                    ey as f32,
+                                    (SCREEN_WIDTH - TEXT_LEFT - ROW_PAD_X) as f32,
+                                    eh as f32,
+                                );
+                                if touches.iter().any(|&(x, y)| er.contains(x, y)) {
+                                    tap = Some(ThreadTap::OpenVideo(target));
+                                    break;
+                                }
+                            }
                         }
                         if let Some(quote_uri) =
                             crate::embeds::quote_uri_in_embed(post.post.embed.as_ref())
@@ -296,6 +316,13 @@ impl Screen for ThreadScreen {
                     return ScreenAction::Push(Box::new(ThreadScreen::new(
                         Arc::clone(&self.client),
                         uri,
+                    )));
+                }
+                Some(ThreadTap::OpenVideo(target)) => {
+                    return ScreenAction::Push(Box::new(crate::video_player::VideoPlayerScreen::new(
+                        Arc::clone(&self.client),
+                        target.did,
+                        target.cid,
                     )));
                 }
                 None => {}

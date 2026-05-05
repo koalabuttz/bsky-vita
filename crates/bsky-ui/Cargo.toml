@@ -11,5 +11,7 @@ bsky-input  = { path = "../bsky-input" }
 bsky-ime    = { path = "../bsky-ime" }
 bsky-auth   = { path = "../bsky-auth" }
 bsky-worker = { path = "../bsky-worker" }
+bsky-video  = { path = "../bsky-video" }
+bsky-log    = { path = "../bsky-log" }
 atrium-api  = { workspace = true }
 futures     = { workspace = true }

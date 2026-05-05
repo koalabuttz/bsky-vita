@@ -179,6 +179,36 @@ pub(crate) fn embed_image_urls(
     out
 }
 
+/// (`did`, `cid`) target for a tappable video embed, or `None` when
+/// the embed isn't (or doesn't contain) a video. `did` is the post
+/// author's DID — `getBlob` needs it to route to the right repo.
+#[derive(Clone, Debug)]
+pub struct VideoTarget {
+    pub did: String,
+    pub cid: String,
+}
+
+pub(crate) fn video_in_embed(
+    embed: Option<&Union<PostViewEmbedRefs>>,
+    author_did: &str,
+) -> Option<VideoTarget> {
+    let Some(Union::Refs(refs)) = embed else {
+        return None;
+    };
+    let cid = match refs {
+        PostViewEmbedRefs::AppBskyEmbedVideoView(v) => v.cid.as_ref().to_string(),
+        PostViewEmbedRefs::AppBskyEmbedRecordWithMediaView(v) => match v.media.into_refs() {
+            Some(ViewMediaRefs::AppBskyEmbedVideoView(vv)) => vv.cid.as_ref().to_string(),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    Some(VideoTarget {
+        did: author_did.to_string(),
+        cid,
+    })
+}
+
 /// AT-URI of the quoted post if the embed contains one. Returns
 /// `None` for non-quote embeds and for unavailable quotes
 /// (blocked / not found / detached / non-post records).

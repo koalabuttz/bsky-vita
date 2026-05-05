@@ -37,6 +37,9 @@ bsky-ui     = { path = "../crates/bsky-ui" }
 # Phase 3.1: worker thread for non-blocking PDS calls.
 bsky-worker = { path = "../crates/bsky-worker" }
 
+# Phase 5.3: video playback (sceAvPlayer + sceAudioOut wrappers).
+bsky-video  = { path = "../crates/bsky-video" }
+
 [[bin]]
 name = "bsky-vita"
 path = "src/main.rs"

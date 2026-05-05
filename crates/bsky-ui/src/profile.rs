@@ -292,6 +292,7 @@ impl Screen for ProfileScreen {
             // Search results belong to SearchScreen.
             WorkResponse::SearchActors(_) | WorkResponse::SearchPosts(_) => {}
             WorkResponse::Notifications(_) => {}
+            WorkResponse::VideoBlob { .. } => {}
         }
     }
 }

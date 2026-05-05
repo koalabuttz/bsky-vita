@@ -156,6 +156,11 @@ pub enum WorkRequest {
         q: String,
         cursor: Option<String>,
     },
+    /// Download a video blob via `com.atproto.sync.getBlob` and write
+    /// it to a local file. atrium routes the call to the right PDS;
+    /// the handler skips the network round-trip if the file is
+    /// already cached on disk under `<DATA_DIR>/video/<cid>.mp4`.
+    FetchVideoBlob { did: String, cid: String },
 }
 
 /// Minimal data the caller provides for a reply. The worker translates
@@ -272,6 +277,13 @@ pub enum WorkResponse {
     Notifications(Result<NotificationBatch, String>),
     SearchActors(Result<ActorsBatch, String>),
     SearchPosts(Result<PostsBatch, String>),
+    /// `Ok(file_path)` when the video blob is downloaded (or was
+    /// already cached). The caller (`VideoPlayerScreen`) opens the
+    /// file with `sceAvPlayer`.
+    VideoBlob {
+        cid: String,
+        result: Result<String, String>,
+    },
 }
 
 /// Handle to the worker thread. Holds the channel ends and the thread's
@@ -372,6 +384,9 @@ fn log_if_err(resp: &WorkResponse) {
         WorkResponse::SearchPosts(Err(e)) => {
             bsky_log::log!("worker: SearchPosts err: {e}")
         }
+        WorkResponse::VideoBlob { cid, result: Err(e) } => {
+            bsky_log::log!("worker: VideoBlob({cid}) err: {e}")
+        }
         _ => {}
     }
 }
@@ -445,6 +460,7 @@ fn handle_request(client: &AuthClient, req: WorkRequest) -> WorkResponse {
         WorkRequest::DeleteFollow { rkey } => delete_follow(client, &rkey),
         WorkRequest::SearchActors { q, cursor } => search_actors_handler(client, q, cursor),
         WorkRequest::SearchPosts { q, cursor } => search_posts_handler(client, q, cursor),
+        WorkRequest::FetchVideoBlob { did, cid } => fetch_video_blob(client, did, cid),
         WorkRequest::FetchNotifications { cursor } => fetch_notifications(client, cursor),
         WorkRequest::MarkSeen { seen_at } => {
             // Fire-and-forget; the result is logged but not surfaced.
@@ -1106,6 +1122,84 @@ fn create_post(
     match block_on(client.agent.api.com.atproto.repo.create_record(input.into())) {
         Ok(o) => WorkResponse::PostCreated(Ok(o.data.uri)),
         Err(e) => WorkResponse::PostCreated(Err(format!("{e}"))),
+    }
+}
+
+/// Download a video blob via `com.atproto.sync.getBlob` and write it
+/// to `<DATA_DIR>/video/<cid>.mp4`. `getBlob` is implemented by the
+/// post author's PDS — we resolve the author's DID → PDS first
+/// (atrium's authenticated agent only knows the *user's* PDS), then
+/// GET the blob with `VitaHttpClient` (auth-free). If the file
+/// already exists with non-zero size, skip the network entirely.
+fn fetch_video_blob(_client: &AuthClient, did_str: String, cid_str: String) -> WorkResponse {
+    let dir = format!("{}/video", bsky_auth::DATA_DIR);
+    let path = format!("{}/{}.mp4", dir, cid_str);
+
+    // Cache hit?
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if meta.len() > 0 {
+            return WorkResponse::VideoBlob {
+                cid: cid_str,
+                result: Ok(path),
+            };
+        }
+    }
+
+    // Resolve the author's PDS — atrium's identity resolver accepts a
+    // DID directly and walks the PLC/web doc to find the PDS service.
+    bsky_log::log!("VideoBlob: resolving PDS for did={did_str}");
+    let http = std::sync::Arc::new(VitaHttpClient::new());
+    let resolved = match block_on(bsky_auth::resolve_pds(
+        std::sync::Arc::clone(&http),
+        &did_str,
+    )) {
+        Ok(r) => r,
+        Err(e) => {
+            return WorkResponse::VideoBlob {
+                cid: cid_str,
+                result: Err(format!("resolve pds: {e}")),
+            }
+        }
+    };
+    bsky_log::log!("VideoBlob: pds={}", resolved.pds);
+
+    // Construct + GET the URL. `:` in DIDs is RFC 3986-allowed in
+    // query strings without percent-encoding; CIDs are base32 (no
+    // reserved chars).
+    let url = format!(
+        "{}/xrpc/com.atproto.sync.getBlob?did={}&cid={}",
+        resolved.pds.trim_end_matches('/'),
+        did_str,
+        cid_str,
+    );
+    bsky_log::log!("VideoBlob: fetching {url}");
+    let bytes = match fetch_image_bytes(&url) {
+        Ok(b) => b,
+        Err(e) => {
+            return WorkResponse::VideoBlob {
+                cid: cid_str,
+                result: Err(format!("{e}")),
+            }
+        }
+    };
+    bsky_log::log!("VideoBlob: fetched {} bytes", bytes.len());
+
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return WorkResponse::VideoBlob {
+            cid: cid_str,
+            result: Err(format!("mkdir {dir}: {e}")),
+        };
+    }
+    if let Err(e) = std::fs::write(&path, &bytes) {
+        return WorkResponse::VideoBlob {
+            cid: cid_str,
+            result: Err(format!("write {path}: {e}")),
+        };
+    }
+    bsky_log::log!("VideoBlob cached: {path} ({} bytes)", bytes.len());
+    WorkResponse::VideoBlob {
+        cid: cid_str,
+        result: Ok(path),
     }
 }
 

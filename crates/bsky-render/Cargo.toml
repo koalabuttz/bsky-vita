@@ -9,5 +9,8 @@ build = "build.rs"
 # vitasdk-sys is only pulled when targeting Vita. On host, this crate
 # compiles to empty stubs — its tests aren't useful but the workspace
 # still builds without VITASDK present.
+[dependencies]
+bsky-log = { path = "../bsky-log" }
+
 [target.'cfg(target_os = "vita")'.dependencies]
 vitasdk-sys = { workspace = true }

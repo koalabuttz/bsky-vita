@@ -277,6 +277,7 @@ enum TapAction {
     OpenThread(String),
     ToggleLike(usize),
     ToggleRepost(usize),
+    OpenVideo(crate::embeds::VideoTarget),
 }
 
 /// Sentinel URI used while a CreateLike / CreateRepost is in flight.
@@ -752,6 +753,28 @@ impl Screen for TimelineScreen {
                             tap_action = Some(TapAction::ToggleRepost(idx));
                             break;
                         }
+                        // Video-embed region (if any) → OpenVideo. Takes
+                        // precedence over both quote and body taps so a
+                        // tap on the ▶ placeholder opens the player.
+                        if let Some(target) = crate::embeds::video_in_embed(
+                            post.post.embed.as_ref(),
+                            post.post.author.did.as_ref(),
+                        ) {
+                            if let Some((ey, eh)) =
+                                crate::embeds::embed_rect(frame, font, post, y_probe, ctx.emoji)
+                            {
+                                let er = Rect::new(
+                                    TEXT_LEFT as f32,
+                                    ey as f32,
+                                    (SCREEN_WIDTH - TEXT_LEFT - ROW_PAD_X) as f32,
+                                    eh as f32,
+                                );
+                                if touches.iter().any(|&(x, y)| er.contains(x, y)) {
+                                    tap_action = Some(TapAction::OpenVideo(target));
+                                    break;
+                                }
+                            }
+                        }
                         // Quote-embed region (if any) → OpenThread of the
                         // quoted post. Checked BEFORE the body fallback so
                         // a tap on the quote card opens the right thread.
@@ -815,6 +838,13 @@ impl Screen for TimelineScreen {
                     self.selected_idx = idx;
                     self.toggle_repost(ctx);
                     self.selected_idx = prev_sel;
+                }
+                Some(TapAction::OpenVideo(target)) => {
+                    return ScreenAction::Push(Box::new(crate::video_player::VideoPlayerScreen::new(
+                        Arc::clone(&self.client),
+                        target.did,
+                        target.cid,
+                    )));
                 }
                 None => {}
             }
@@ -931,6 +961,8 @@ impl Screen for TimelineScreen {
             WorkResponse::Notifications(_) => {}
             // Search results belong to SearchScreen.
             WorkResponse::SearchActors(_) | WorkResponse::SearchPosts(_) => {}
+            // Video blob responses belong to VideoPlayerScreen.
+            WorkResponse::VideoBlob { .. } => {}
         }
     }
 }

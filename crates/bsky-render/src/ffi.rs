@@ -124,6 +124,22 @@ unsafe extern "C" {
     pub fn vita2d_texture_get_width(texture: *const vita2d_texture) -> c_uint;
     pub fn vita2d_texture_get_height(texture: *const vita2d_texture) -> c_uint;
 
+    // Empty-texture creation for video frames (Phase 5.3). The
+    // `format` arg takes a `SceGxmTextureFormat` numeric constant —
+    // for video we use `SCE_GXM_TEXTURE_FORMAT_YUV420P3_CSC0`
+    // (= 0x90F00000), defined in `crate::Texture`.
+    pub fn vita2d_create_empty_texture_format(
+        w: c_uint,
+        h: c_uint,
+        format: c_uint,
+    ) -> *mut vita2d_texture;
+    /// Pointer to the texture's CPU-mapped buffer. For YUV420P3 the
+    /// buffer holds Y / U / V planes back-to-back, each plane stride =
+    /// `vita2d_texture_get_stride` (texture stride is uniform; chroma
+    /// planes are simply half-pitch from libvita2d's perspective).
+    pub fn vita2d_texture_get_datap(texture: *const vita2d_texture) -> *mut c_void;
+    pub fn vita2d_texture_get_stride(texture: *const vita2d_texture) -> c_uint;
+
     // Draw variants. The `_part_scale` form picks a sub-rectangle from
     // the source texture (atlas) and scales it independently per axis —
     // exactly what we need for emoji glyph rendering.

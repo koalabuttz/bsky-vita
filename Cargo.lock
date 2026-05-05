@@ -197,6 +197,7 @@ dependencies = [
 name = "bsky-render"
 version = "0.1.0"
 dependencies = [
+ "bsky-log",
  "vitasdk-sys",
 ]
 
@@ -212,9 +213,19 @@ dependencies = [
  "bsky-auth",
  "bsky-ime",
  "bsky-input",
+ "bsky-log",
  "bsky-render",
+ "bsky-video",
  "bsky-worker",
  "futures",
+]
+
+[[package]]
+name = "bsky-video"
+version = "0.1.0"
+dependencies = [
+ "bsky-log",
+ "vitasdk-sys",
 ]
 
 [[package]]
@@ -230,6 +241,7 @@ dependencies = [
  "bsky-net",
  "bsky-render",
  "bsky-ui",
+ "bsky-video",
  "bsky-worker",
  "futures",
  "serde_json",
