@@ -26,7 +26,7 @@ use std::sync::Arc;
 use bsky_auth::AuthClient;
 use bsky_ime::Ime;
 use bsky_input::buttons;
-use bsky_render::{theme, Font, Frame, Texture, SCREEN_HEIGHT, SCREEN_WIDTH};
+use bsky_render::{theme, Font, Frame, YuvTexture, SCREEN_HEIGHT, SCREEN_WIDTH};
 use bsky_video::{AudioOut, PlayerState, VideoPlayer};
 use bsky_worker::{WorkRequest, WorkResponse};
 
@@ -49,7 +49,7 @@ enum VideoState {
     Playing {
         player: VideoPlayer,
         audio: AudioOut,
-        tex: Option<Texture>,
+        tex: Option<YuvTexture>,
         // Cached so we don't re-create the texture every frame.
         tex_w: u32,
         tex_h: u32,
@@ -162,7 +162,7 @@ impl Screen for VideoPlayerScreen {
             // (re)create the texture.
             if let Some(yuv) = player.next_video_frame() {
                 if *tex_w != yuv.width || *tex_h != yuv.height || tex.is_none() {
-                    match Texture::create_yuv420(yuv.width, yuv.height) {
+                    match YuvTexture::create(yuv.width, yuv.height) {
                         Ok(t) => {
                             *tex = Some(t);
                             *tex_w = yuv.width;
@@ -173,13 +173,8 @@ impl Screen for VideoPlayerScreen {
                         }
                     }
                 }
-                if let Some(t) = tex.as_ref() {
-                    t.upload_yuv420(
-                        yuv.y, yuv.y_pitch,
-                        yuv.u, yuv.u_pitch,
-                        yuv.v, yuv.v_pitch,
-                        yuv.width, yuv.height,
-                    );
+                if let Some(t) = tex.as_mut() {
+                    t.upload(yuv.y, yuv.y_pitch, yuv.uv, yuv.uv_pitch);
                 }
             }
             // Pull a small batch of audio chunks per render frame.
@@ -230,13 +225,12 @@ impl Screen for VideoPlayerScreen {
             }
             VideoState::Playing { player, tex, tex_w, tex_h, .. } => {
                 if let Some(t) = tex.as_ref() {
-                    let (sx, sy, dx, dy, dw, dh) =
+                    let (_sx, _sy, dx, dy, dw, dh) =
                         aspect_fit(*tex_w, *tex_h);
-                    // Full-resolution YUV texture; GPU sampler
-                    // does YUV→RGB at sample time. No CPU
-                    // conversion, no upscale — just blit.
-                    frame.draw_texture_scale(t, dx, dy, sx, sy);
-                    let _ = (dw, dh);
+                    // Custom GXM YUV→RGB shader (Phase 5.3.x.1):
+                    // three luma textures → fragment shader applies
+                    // BT.601 limited-range matrix → opaque RGBA.
+                    frame.draw_video_yuv(t, dx, dy, dw, dh);
                 }
                 if self.show_overlay() {
                     draw_transport(frame, font, player);

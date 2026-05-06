@@ -70,8 +70,15 @@ pub enum PlayerState {
     Eof,
 }
 
-/// One decoded video frame in YUV420P3 layout. Borrowed from the
-/// player; valid only until the next call to `next_video_frame`.
+/// One decoded video frame in NV12 layout. Borrowed from the player;
+/// valid only until the next call to `next_video_frame`.
+///
+/// sceAvPlayer outputs NV12 (a.k.a. YUV420P2): a Y plane followed by
+/// an interleaved UV plane (`U V U V U V …`) at half-vertical and
+/// half-horizontal resolution. Until 5.3.x.1 we mistakenly assumed
+/// YUV420P3 (planar U + planar V) — splitting the interleaved UV in
+/// half made both halves look like ~128-clustered noise (the chroma
+/// readback signature `[93, 6a, 93, 6a, …]` was the giveaway).
 pub struct YuvFrame<'a> {
     pub width: u32,
     pub height: u32,
@@ -79,10 +86,12 @@ pub struct YuvFrame<'a> {
     pub timestamp_us: u64,
     pub y: &'a [u8],
     pub y_pitch: usize,
-    pub u: &'a [u8],
-    pub u_pitch: usize,
-    pub v: &'a [u8],
-    pub v_pitch: usize,
+    /// Interleaved UV plane: `width × (height/2)` bytes, row pitch =
+    /// `width`, each row contains `width/2` (U, V) byte pairs. The
+    /// renderer is responsible for deinterleaving when binding two
+    /// luma-format textures.
+    pub uv: &'a [u8],
+    pub uv_pitch: usize,
 }
 
 /// One chunk of decoded audio samples (16-bit PCM, interleaved per
@@ -265,30 +274,28 @@ impl VideoPlayer {
             let h = video.height;
             self.video_w = w;
             self.video_h = h;
-            // sceAvPlayer doesn't expose source plane pitches in the
-            // frame info struct. Empirically the Y plane is laid out
-            // with `pitch = width` (no padding) and U/V with
-            // `pitch = width/2`. Chroma planes follow the Y plane
-            // back-to-back. Verified visually — 32-byte alignment
-            // produced vertical stripes.
+            // sceAvPlayer outputs NV12: Y plane (pitch = width, no
+            // padding), then interleaved UV plane (pitch = width,
+            // height = h/2). Chroma readback signature `[93, 6a, 93,
+            // 6a, …]` confirmed the UV plane is interleaved (treating
+            // it as planar U + planar V produced two muted-grey halves
+            // that looked correct as samples but rendered as
+            // near-greyscale through BT.601).
             let y_pitch = w as usize;
-            let u_pitch = (w / 2) as usize;
+            let uv_pitch = w as usize;
             let y_len = y_pitch * h as usize;
-            let u_len = u_pitch * (h / 2) as usize;
+            let uv_len = uv_pitch * (h as usize / 2);
             let base = info.pData;
             let y = core::slice::from_raw_parts(base, y_len);
-            let u = core::slice::from_raw_parts(base.add(y_len), u_len);
-            let v = core::slice::from_raw_parts(base.add(y_len + u_len), u_len);
+            let uv = core::slice::from_raw_parts(base.add(y_len), uv_len);
             Some(YuvFrame {
                 width: w,
                 height: h,
                 timestamp_us: info.timeStamp,
                 y,
                 y_pitch,
-                u,
-                u_pitch,
-                v,
-                v_pitch: u_pitch,
+                uv,
+                uv_pitch,
             })
         }
         #[cfg(not(target_os = "vita"))]

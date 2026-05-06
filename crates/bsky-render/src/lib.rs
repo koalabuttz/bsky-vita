@@ -32,10 +32,46 @@
 
 #[cfg(target_os = "vita")]
 mod ffi;
+#[cfg(target_os = "vita")]
+mod video_shader;
+#[cfg(target_os = "vita")]
+mod video_shader_src;
 // ATLAS_COLS / ATLAS_ROWS are used by external tooling readers; keep
 // them in the generated file for documentation even if unread by us.
 #[allow(dead_code)]
 mod emoji_table;
+
+/// A YUV420 video frame as three GXM-bindable luma-format textures
+/// (Y at full resolution, U/V at half). Unique to video playback —
+/// consumed only by [`Frame::draw_video_yuv`]. Created with
+/// [`YuvTexture::create`], updated each frame with [`YuvTexture::upload`].
+///
+/// On non-Vita targets this is an inert stub that returns `NotOnVita`.
+#[cfg(target_os = "vita")]
+pub use video_shader::YuvTexture;
+
+#[cfg(not(target_os = "vita"))]
+pub struct YuvTexture {
+    _phantom: PhantomData<*const ()>,
+}
+
+#[cfg(not(target_os = "vita"))]
+impl YuvTexture {
+    pub fn create(_width: u32, _height: u32) -> Result<Self, RenderError> {
+        Err(RenderError::NotOnVita)
+    }
+    pub fn upload(
+        &mut self,
+        _y: &[u8],
+        _y_pitch: usize,
+        _uv: &[u8],
+        _uv_pitch: usize,
+    ) {
+    }
+    pub fn upload_test_pattern(&self) {}
+    pub fn width(&self) -> u32 { 0 }
+    pub fn height(&self) -> u32 { 0 }
+}
 
 #[cfg(target_os = "vita")]
 use core::ffi::c_uint;
@@ -51,11 +87,6 @@ use std::ffi::CString;
 pub const SCREEN_WIDTH: i32 = 960;
 pub const SCREEN_HEIGHT: i32 = 544;
 
-
-/// `SceGxmTextureFormat::SCE_GXM_TEXTURE_FORMAT_A8B8G8R8` — standard
-/// RGBA texture used by `Texture::create_yuv420`.
-#[cfg(target_os = "vita")]
-const SCE_GXM_TEXTURE_FORMAT_A8B8G8R8: c_uint = 0x0C00_0000;
 
 /// 32-bit RGBA color matching vita2d's `RGBA8` macro layout: alpha in the
 /// MSB, then blue, then green, then red in the LSB. Construct via
@@ -392,73 +423,6 @@ impl Texture {
     }
     pub fn height(&self) -> i32 {
         self.height
-    }
-
-    /// Allocate a full-resolution RGBA8 texture for video frames.
-    /// Color reproduction would need a custom GXM fragment shader
-    /// that does YUV→RGB conversion (vita2d's stock shader binding
-    /// doesn't activate the sampler's hardware CSC path even for
-    /// YUV-format textures). For 5.3.x we ship greyscale — read the
-    /// Y plane and spread to RGBA in [`Texture::upload_yuv420`].
-    /// Color is a known follow-up.
-    pub fn create_yuv420(width: u32, height: u32) -> Result<Self, RenderError> {
-        #[cfg(target_os = "vita")]
-        {
-            let p = unsafe {
-                ffi::vita2d_create_empty_texture_format(
-                    width,
-                    height,
-                    SCE_GXM_TEXTURE_FORMAT_A8B8G8R8,
-                )
-            };
-            Self::wrap_raw(p, "RGBA8")
-        }
-        #[cfg(not(target_os = "vita"))]
-        {
-            let _ = (width, height);
-            Err(RenderError::NotOnVita)
-        }
-    }
-
-    /// Greyscale upload: read each Y byte, splat it across R/G/B of
-    /// the RGBA texture (alpha = 0xFF). Ignores U/V planes — color
-    /// is deferred until a custom GXM YUV shader lands. The
-    /// per-pixel cost is one read + one 4-byte packed write, no
-    /// math; ~140 MB/s of memory bandwidth at 720p/30 fps which the
-    /// Vita's CPU + RAM can sustain.
-    pub fn upload_yuv420(
-        &self,
-        y: &[u8],
-        y_pitch: usize,
-        _u: &[u8],
-        _u_pitch: usize,
-        _v: &[u8],
-        _v_pitch: usize,
-        width: u32,
-        height: u32,
-    ) {
-        #[cfg(target_os = "vita")]
-        unsafe {
-            let dst_stride = ffi::vita2d_texture_get_stride(self.ptr.as_ptr()) as usize;
-            let base = ffi::vita2d_texture_get_datap(self.ptr.as_ptr()) as *mut u8;
-            if base.is_null() {
-                return;
-            }
-            let w = width as usize;
-            let h = height as usize;
-            for row in 0..h {
-                let src = y.as_ptr().add(row * y_pitch);
-                let dst = base.add(row * dst_stride) as *mut u32;
-                for col in 0..w {
-                    let yv = *src.add(col) as u32;
-                    *dst.add(col) = 0xFF00_0000 | (yv << 16) | (yv << 8) | yv;
-                }
-            }
-        }
-        #[cfg(not(target_os = "vita"))]
-        {
-            let _ = (y, y_pitch, _u, _u_pitch, _v, _v_pitch, width, height);
-        }
     }
 
     #[cfg(target_os = "vita")]
@@ -993,6 +957,44 @@ impl<'r> Frame<'r> {
         #[cfg(not(target_os = "vita"))]
         {
             let _ = (tex, x, y, src_x, src_y, src_w, src_h, x_scale, y_scale);
+        }
+    }
+
+    /// Draw a YUV420 video texture to the screen rectangle
+    /// `(dest_x, dest_y, dest_w, dest_h)` in pixels. Uses a custom
+    /// GXM fragment shader that does BT.601 YUV→RGB conversion on the
+    /// GPU (Phase 5.3.x.1). vita2d's stock textured shader path
+    /// continues to be used by every other draw call.
+    ///
+    /// On the first call ever, this triggers shader compilation via
+    /// libshacccg.suprx (~50 ms one-shot). Subsequent calls just
+    /// reissue the GXM draw command.
+    pub fn draw_video_yuv(
+        &mut self,
+        tex: &YuvTexture,
+        dest_x: f32,
+        dest_y: f32,
+        dest_w: f32,
+        dest_h: f32,
+    ) {
+        #[cfg(target_os = "vita")]
+        {
+            if let Some(pipeline) = video_shader::ensure_pipeline() {
+                video_shader::draw_quad(
+                    pipeline,
+                    tex,
+                    dest_x,
+                    dest_y,
+                    dest_w,
+                    dest_h,
+                    SCREEN_WIDTH as f32,
+                    SCREEN_HEIGHT as f32,
+                );
+            }
+        }
+        #[cfg(not(target_os = "vita"))]
+        {
+            let _ = (tex, dest_x, dest_y, dest_w, dest_h);
         }
     }
 

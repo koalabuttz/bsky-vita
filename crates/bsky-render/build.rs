@@ -49,6 +49,25 @@ fn main() {
             "SceSysmem_stub",
             "SceLibKernel_stub",
             "SceAppMgr_stub",
+            // Phase 5.3.x.1 — runtime Cg shader compilation (custom YUV
+            // fragment shader for color video). Order matters:
+            // libvitashark.a references SceShaccCgExt (default callback
+            // helpers), which references SceShaccCg_stub (the SHACCCG
+            // module's stubs), which references SceSysmodule_stub
+            // (sceSysmoduleLoadModule) — list in that order so unresolved
+            // refs flow to later archives.
+            "SceShaccCgExt",
+            "SceShaccCg_stub",
+            "SceSysmodule_stub",
+            // SceShaccCgExt uses taiHEN to monkey-patch SHACCCG;
+            // libtaihen_stub.a provides the stubs for its tai*
+            // hook/inject calls. Required transitively by SceShaccCgExt
+            // even though we never call taiHEN directly.
+            "taihen_stub",
+            // sceDmacMemcpy — hardware DMA used by the video YUV
+            // upload path to move sceAvPlayer's PHYCONT decoder buffer
+            // to our CDRAM textures without burning CPU.
+            "SceKernelDmacMgr_stub",
         ];
         for lib in libs {
             println!("cargo:rustc-link-lib=static={lib}");

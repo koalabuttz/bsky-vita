@@ -195,4 +195,24 @@ unsafe extern "C" {
         x_scale: c_float,
         y_scale: c_float,
     );
+
+    // Phase 5.3.x.1 — vita2d's GXM context + shader patcher accessors.
+    // We register our YUV→RGB shader programs with vita2d's existing
+    // patcher and submit our draw to vita2d's existing context, rather
+    // than standing up a parallel GXM init dance. The pool helpers give
+    // us GPU-mapped per-frame scratch (vertex buffer for the video
+    // quad); the linear-indices accessor returns a pre-allocated
+    // GPU-mapped index buffer of [0, 1, 2, …, MAX].
+    pub fn vita2d_get_context() -> *mut vitasdk_sys::SceGxmContext;
+    pub fn vita2d_get_shader_patcher() -> *mut vitasdk_sys::SceGxmShaderPatcher;
+    pub fn vita2d_get_linear_indices() -> *const u16;
+    pub fn vita2d_pool_memalign(size: c_uint, alignment: c_uint) -> *mut c_void;
+}
+
+// Newlib's malloc/free, linked via libc (already on the link line for
+// every Vita binary). SHACCCG's `sceShaccCgSetDefaultAllocator` needs
+// these as callbacks so its internal scratch buffers can be allocated.
+unsafe extern "C" {
+    pub fn malloc(size: c_uint) -> *mut c_void;
+    pub fn free(ptr: *mut c_void);
 }
