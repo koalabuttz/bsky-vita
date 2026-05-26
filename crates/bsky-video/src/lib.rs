@@ -563,11 +563,6 @@ unsafe extern "C" fn av_free(_user: *mut core::ffi::c_void, ptr: *mut core::ffi:
     dealloc(raw, layout);
 }
 
-#[cfg(target_os = "vita")]
-fn align_up_32(n: usize) -> usize {
-    (n + 31) & !31
-}
-
 // ─── GPU-mapped texture allocator ────────────────────────────────────
 //
 // libsceAvPlayer's H.264 hardware decoder writes decoded YUV frames

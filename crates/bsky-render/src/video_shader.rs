@@ -39,7 +39,7 @@ use vitasdk_sys::{
     sceGxmSetFragmentProgram, sceGxmSetFragmentTexture, sceGxmSetVertexProgram,
     sceGxmSetVertexStream, sceGxmShaderPatcherCreateFragmentProgram,
     sceGxmShaderPatcherCreateVertexProgram, sceGxmShaderPatcherRegisterProgram,
-    sceGxmTextureInitLinear, sceGxmTextureSetMagFilter, sceGxmTextureSetMinFilter,
+    sceGxmTextureSetMagFilter, sceGxmTextureSetMinFilter,
     sceGxmTextureInitLinearStrided, sceGxmTextureSetUAddrMode, sceGxmTextureSetVAddrMode,
     sceGxmMapMemory, sceGxmUnmapMemory,
     sceKernelAllocMemBlock, sceKernelFindMemBlockByAddr, sceKernelFreeMemBlock,
@@ -183,8 +183,6 @@ struct PlaneTexture {
     gxm_tex: SceGxmTexture,
     memblock_uid: i32,
     base: *mut u8,
-    /// Allocated size in bytes (rounded up to memblock granularity).
-    size: u32,
     width: u32,
     height: u32,
     /// Texture stride in bytes — width rounded up to 32 bytes for GXM
@@ -274,7 +272,6 @@ impl PlaneTexture {
             gxm_tex,
             memblock_uid: uid,
             base: base as *mut u8,
-            size,
             width,
             height,
             stride,
