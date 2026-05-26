@@ -44,13 +44,15 @@ use atrium_api::app::bsky::actor::defs::{
 use atrium_api::app::bsky::actor::{get_preferences, get_profile, search_actors};
 use atrium_api::app::bsky::feed::search_posts;
 use atrium_api::app::bsky::feed::defs::{
-    FeedViewPost, PostView, ThreadViewPostParentRefs, ThreadViewPostRepliesItem,
+    FeedViewPost, GeneratorView, PostView, ThreadViewPostParentRefs, ThreadViewPostRepliesItem,
 };
-use atrium_api::app::bsky::feed::get_feed;
-use atrium_api::app::bsky::feed::get_feed_generators;
-use atrium_api::app::bsky::feed::get_post_thread;
+use atrium_api::app::bsky::feed::{
+    get_actor_feeds, get_actor_likes, get_author_feed, get_feed, get_feed_generators,
+    get_post_thread, get_timeline,
+};
 use atrium_api::app::bsky::feed::get_post_thread::OutputThreadRefs;
-use atrium_api::app::bsky::feed::get_timeline;
+use atrium_api::app::bsky::graph::defs::{ListView, StarterPackViewBasic};
+use atrium_api::app::bsky::graph::{get_actor_starter_packs, get_lists};
 use atrium_api::app::bsky::feed::like::RecordData as LikeRecordData;
 use atrium_api::app::bsky::feed::post::{RecordData as PostRecordData, ReplyRefData};
 use atrium_api::app::bsky::feed::repost::RecordData as RepostRecordData;
@@ -84,6 +86,21 @@ pub enum FeedSource {
     /// Phase 5.1 doesn't support `app.bsky.graph.list` URIs (lists);
     /// those use a separate `getListFeed` endpoint and are deferred.
     Feed(String),
+    /// Posts authored by `actor` — `getAuthorFeed` with
+    /// `filter="posts_and_author_threads"`. Includes the pinned post
+    /// inline as the first item (with a `ReasonPin` reason) when
+    /// `cursor` is `None`. Used by ProfileScreen's Posts tab.
+    AuthorPosts { actor: String },
+    /// Posts + replies authored by `actor` — `getAuthorFeed` with
+    /// `filter="posts_with_replies"`. Used by ProfileScreen's Replies tab.
+    AuthorReplies { actor: String },
+    /// Posts with media (images / video) authored by `actor` —
+    /// `getAuthorFeed` with `filter="posts_with_media"`. Used by
+    /// ProfileScreen's Media tab.
+    AuthorMedia { actor: String },
+    /// Posts liked by `actor` — `getActorLikes`. Server enforces
+    /// own-profile-only visibility. Used by ProfileScreen's Likes tab.
+    AuthorLikes { actor: String },
 }
 
 /// Work the worker thread can be asked to perform. Add a variant per new
@@ -161,6 +178,17 @@ pub enum WorkRequest {
     /// the handler skips the network round-trip if the file is
     /// already cached on disk under `<DATA_DIR>/video/<cid>.mp4`.
     FetchVideoBlob { did: String, cid: String },
+    /// Fetch a page of feed generators (custom feeds) created by
+    /// `actor` via `app.bsky.feed.getActorFeeds`. Used by
+    /// ProfileScreen's Feeds tab. `actor` is the resolved DID.
+    FetchActorFeeds { actor: String, cursor: Option<String> },
+    /// Fetch a page of lists curated by `actor` via
+    /// `app.bsky.graph.getLists`. Used by ProfileScreen's Lists tab.
+    FetchActorLists { actor: String, cursor: Option<String> },
+    /// Fetch a page of starter packs created by `actor` via
+    /// `app.bsky.graph.getActorStarterPacks`. Used by
+    /// ProfileScreen's Packs tab.
+    FetchActorStarterPacks { actor: String, cursor: Option<String> },
 }
 
 /// Minimal data the caller provides for a reply. The worker translates
@@ -226,6 +254,24 @@ pub struct PostsBatch {
     pub cursor: Option<String>,
 }
 
+/// One page of feed generators (custom feeds) created by an actor.
+pub struct ActorFeedsBatch {
+    pub feeds: Vec<GeneratorView>,
+    pub cursor: Option<String>,
+}
+
+/// One page of lists curated by an actor.
+pub struct ActorListsBatch {
+    pub lists: Vec<ListView>,
+    pub cursor: Option<String>,
+}
+
+/// One page of starter packs created by an actor.
+pub struct ActorStarterPacksBatch {
+    pub starter_packs: Vec<StarterPackViewBasic>,
+    pub cursor: Option<String>,
+}
+
 /// A flattened thread view — ancestors above the focus (oldest first),
 /// the focused post itself, and direct replies. Phase 4.4 MVP: replies
 /// are first-level only (no nested reply rendering); future phases
@@ -283,6 +329,23 @@ pub enum WorkResponse {
     VideoBlob {
         cid: String,
         result: Result<String, String>,
+    },
+    /// One page of an actor's custom feeds. `actor` is the resolved DID
+    /// — used by ProfileScreen as the staleness key (drops responses
+    /// that arrive after the user has navigated to a different profile).
+    ActorFeeds {
+        actor: String,
+        batch: Result<ActorFeedsBatch, String>,
+    },
+    /// One page of an actor's curated lists.
+    ActorLists {
+        actor: String,
+        batch: Result<ActorListsBatch, String>,
+    },
+    /// One page of an actor's starter packs.
+    ActorStarterPacks {
+        actor: String,
+        batch: Result<ActorStarterPacksBatch, String>,
     },
 }
 
@@ -387,6 +450,15 @@ fn log_if_err(resp: &WorkResponse) {
         WorkResponse::VideoBlob { cid, result: Err(e) } => {
             bsky_log::log!("worker: VideoBlob({cid}) err: {e}")
         }
+        WorkResponse::ActorFeeds { actor, batch: Err(e) } => {
+            bsky_log::log!("worker: ActorFeeds({actor}) err: {e}")
+        }
+        WorkResponse::ActorLists { actor, batch: Err(e) } => {
+            bsky_log::log!("worker: ActorLists({actor}) err: {e}")
+        }
+        WorkResponse::ActorStarterPacks { actor, batch: Err(e) } => {
+            bsky_log::log!("worker: ActorStarterPacks({actor}) err: {e}")
+        }
         _ => {}
     }
 }
@@ -461,6 +533,15 @@ fn handle_request(client: &AuthClient, req: WorkRequest) -> WorkResponse {
         WorkRequest::SearchActors { q, cursor } => search_actors_handler(client, q, cursor),
         WorkRequest::SearchPosts { q, cursor } => search_posts_handler(client, q, cursor),
         WorkRequest::FetchVideoBlob { did, cid } => fetch_video_blob(client, did, cid),
+        WorkRequest::FetchActorFeeds { actor, cursor } => {
+            fetch_actor_feeds(client, actor, cursor)
+        }
+        WorkRequest::FetchActorLists { actor, cursor } => {
+            fetch_actor_lists(client, actor, cursor)
+        }
+        WorkRequest::FetchActorStarterPacks { actor, cursor } => {
+            fetch_actor_starter_packs(client, actor, cursor)
+        }
         WorkRequest::FetchNotifications { cursor } => fetch_notifications(client, cursor),
         WorkRequest::MarkSeen { seen_at } => {
             // Fire-and-forget; the result is logged but not surfaced.
@@ -584,6 +665,197 @@ fn fetch_feed_page(
                 },
             }
         }
+        FeedSource::AuthorPosts { .. }
+        | FeedSource::AuthorReplies { .. }
+        | FeedSource::AuthorMedia { .. } => {
+            let (actor, filter) = match &source {
+                FeedSource::AuthorPosts { actor } => (actor.clone(), "posts_and_author_threads"),
+                FeedSource::AuthorReplies { actor } => (actor.clone(), "posts_with_replies"),
+                FeedSource::AuthorMedia { actor } => (actor.clone(), "posts_with_media"),
+                _ => unreachable!(),
+            };
+            let at_id = match AtIdentifier::from_str(&actor) {
+                Ok(id) => id,
+                Err(e) => {
+                    return WorkResponse::FeedPage {
+                        source,
+                        batch: Err(format!("invalid actor {actor:?}: {e}")),
+                    };
+                }
+            };
+            // include_pins only matters for the first page, and only
+            // for posts_and_author_threads (the bsky-app convention).
+            let include_pins = matches!(source, FeedSource::AuthorPosts { .. })
+                && cursor.is_none();
+            let params = get_author_feed::ParametersData {
+                actor: at_id,
+                cursor,
+                filter: Some(filter.to_string()),
+                include_pins: Some(include_pins),
+                limit: Some(limit),
+            }
+            .into();
+            match block_on(client.agent.api.app.bsky.feed.get_author_feed(params)) {
+                Ok(o) => WorkResponse::FeedPage {
+                    source,
+                    batch: Ok(TimelineBatch {
+                        posts: o.data.feed,
+                        cursor: o.data.cursor,
+                    }),
+                },
+                Err(e) => WorkResponse::FeedPage {
+                    source,
+                    batch: Err(format!("{e}")),
+                },
+            }
+        }
+        FeedSource::AuthorLikes { actor } => {
+            let actor = actor.clone();
+            let at_id = match AtIdentifier::from_str(&actor) {
+                Ok(id) => id,
+                Err(e) => {
+                    return WorkResponse::FeedPage {
+                        source,
+                        batch: Err(format!("invalid actor {actor:?}: {e}")),
+                    };
+                }
+            };
+            let params = get_actor_likes::ParametersData {
+                actor: at_id,
+                cursor,
+                limit: Some(limit),
+            }
+            .into();
+            match block_on(client.agent.api.app.bsky.feed.get_actor_likes(params)) {
+                Ok(o) => WorkResponse::FeedPage {
+                    source,
+                    batch: Ok(TimelineBatch {
+                        posts: o.data.feed,
+                        cursor: o.data.cursor,
+                    }),
+                },
+                Err(e) => WorkResponse::FeedPage {
+                    source,
+                    batch: Err(format!("{e}")),
+                },
+            }
+        }
+    }
+}
+
+/// Fetch a page of custom feeds (`GeneratorView`s) created by `actor`.
+/// `actor` is echoed in the response as the staleness key.
+fn fetch_actor_feeds(
+    client: &AuthClient,
+    actor: String,
+    cursor: Option<String>,
+) -> WorkResponse {
+    let limit = LimitedNonZeroU8::<100>::try_from(50)
+        .expect("50 fits in LimitedNonZeroU8<100>");
+    let at_id = match AtIdentifier::from_str(&actor) {
+        Ok(id) => id,
+        Err(e) => {
+            return WorkResponse::ActorFeeds {
+                actor,
+                batch: Err(format!("invalid actor: {e}")),
+            };
+        }
+    };
+    let params = get_actor_feeds::ParametersData {
+        actor: at_id,
+        cursor,
+        limit: Some(limit),
+    }
+    .into();
+    match block_on(client.agent.api.app.bsky.feed.get_actor_feeds(params)) {
+        Ok(o) => WorkResponse::ActorFeeds {
+            actor,
+            batch: Ok(ActorFeedsBatch {
+                feeds: o.data.feeds,
+                cursor: o.data.cursor,
+            }),
+        },
+        Err(e) => WorkResponse::ActorFeeds {
+            actor,
+            batch: Err(format!("{e}")),
+        },
+    }
+}
+
+/// Fetch a page of lists curated by `actor`.
+fn fetch_actor_lists(
+    client: &AuthClient,
+    actor: String,
+    cursor: Option<String>,
+) -> WorkResponse {
+    let limit = LimitedNonZeroU8::<100>::try_from(50)
+        .expect("50 fits in LimitedNonZeroU8<100>");
+    let at_id = match AtIdentifier::from_str(&actor) {
+        Ok(id) => id,
+        Err(e) => {
+            return WorkResponse::ActorLists {
+                actor,
+                batch: Err(format!("invalid actor: {e}")),
+            };
+        }
+    };
+    let params = get_lists::ParametersData {
+        actor: at_id,
+        cursor,
+        limit: Some(limit),
+        purposes: None,
+    }
+    .into();
+    match block_on(client.agent.api.app.bsky.graph.get_lists(params)) {
+        Ok(o) => WorkResponse::ActorLists {
+            actor,
+            batch: Ok(ActorListsBatch {
+                lists: o.data.lists,
+                cursor: o.data.cursor,
+            }),
+        },
+        Err(e) => WorkResponse::ActorLists {
+            actor,
+            batch: Err(format!("{e}")),
+        },
+    }
+}
+
+/// Fetch a page of starter packs created by `actor`.
+fn fetch_actor_starter_packs(
+    client: &AuthClient,
+    actor: String,
+    cursor: Option<String>,
+) -> WorkResponse {
+    let limit = LimitedNonZeroU8::<100>::try_from(50)
+        .expect("50 fits in LimitedNonZeroU8<100>");
+    let at_id = match AtIdentifier::from_str(&actor) {
+        Ok(id) => id,
+        Err(e) => {
+            return WorkResponse::ActorStarterPacks {
+                actor,
+                batch: Err(format!("invalid actor: {e}")),
+            };
+        }
+    };
+    let params = get_actor_starter_packs::ParametersData {
+        actor: at_id,
+        cursor,
+        limit: Some(limit),
+    }
+    .into();
+    match block_on(client.agent.api.app.bsky.graph.get_actor_starter_packs(params)) {
+        Ok(o) => WorkResponse::ActorStarterPacks {
+            actor,
+            batch: Ok(ActorStarterPacksBatch {
+                starter_packs: o.data.starter_packs,
+                cursor: o.data.cursor,
+            }),
+        },
+        Err(e) => WorkResponse::ActorStarterPacks {
+            actor,
+            batch: Err(format!("{e}")),
+        },
     }
 }
 

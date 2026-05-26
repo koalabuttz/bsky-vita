@@ -146,14 +146,33 @@ pub struct TimelineScreen {
     /// focused row visible. Defaults to 0 on screen entry.
     selected_idx: usize,
     tab_bar: TabBar,
+    /// `true` when this instance was pushed via `with_feed` (e.g. the
+    /// user tapped a Feeds-tab row on a profile). Pushed instances
+    /// behave as sub-screens: no tab bar, CIRCLE pops back, no
+    /// pill-row above the feed (since it's targeting a specific feed
+    /// rather than offering feed switching).
+    is_pushed: bool,
 }
 
 impl TimelineScreen {
     pub fn new(client: Arc<AuthClient>) -> Self {
+        Self::with_source(client, FeedSource::Following, false)
+    }
+
+    /// Construct a `TimelineScreen` pre-loaded with a custom feed
+    /// source (an `at://…/app.bsky.feed.generator/…` URI). Used when
+    /// the ProfileScreen's Feeds tab is tapped and we want to push a
+    /// timeline showing that feed's content. The pushed instance
+    /// hides the bottom tab bar + pill row and treats CIRCLE as Pop.
+    pub fn with_feed(client: Arc<AuthClient>, feed_uri: String) -> Self {
+        Self::with_source(client, FeedSource::Feed(feed_uri), true)
+    }
+
+    fn with_source(client: Arc<AuthClient>, source: FeedSource, is_pushed: bool) -> Self {
         Self {
             client,
             state: TimelineState::Loading,
-            current_source: FeedSource::Following,
+            current_source: source,
             saved_feeds: Vec::new(),
             pill_buttons: Vec::new(),
             saved_feeds_dispatched: false,
@@ -164,6 +183,7 @@ impl TimelineScreen {
             inflight_avatars: HashSet::new(),
             selected_idx: 0,
             tab_bar: TabBar::new(TopLevel::Home),
+            is_pushed,
         }
     }
 
@@ -272,12 +292,97 @@ pub(crate) enum EngagementKind {
 /// Pending tap result from the touch hit-test pass. Built up while
 /// iterating posts (immutable borrow), then applied after the loop
 /// finishes (mutable borrow of `self`).
-enum TapAction {
+/// Per-row tap-action result from `detect_post_tap_action`. The `idx`
+/// fields refer to the index of the tapped post within whatever list
+/// the caller is iterating (timeline state's `posts`, profile-tab's
+/// `posts`, etc.).
+pub(crate) enum TapAction {
     OpenProfile(String),
     OpenThread(String),
     ToggleLike(usize),
     ToggleRepost(usize),
     OpenVideo(crate::embeds::VideoTarget),
+}
+
+/// Hit-test one post row at `(0..SCREEN_WIDTH) × (row_y..row_y+row_h)`
+/// against the given touches, returning the appropriate tap action if
+/// any zone is hit. Zone precedence: author region → counts (likes /
+/// reposts) → video embed → quote embed → body. `idx` is echoed back
+/// in `ToggleLike`/`ToggleRepost` actions so the caller knows which
+/// post to mutate.
+///
+/// Reused across TimelineScreen, ThreadScreen, SearchScreen, and
+/// ProfileScreen — every screen that renders post rows.
+pub(crate) fn detect_post_tap_action(
+    frame: &Frame,
+    font: &Font,
+    post: &FeedViewPost,
+    row_y: i32,
+    row_h: i32,
+    touches: &[(i32, i32)],
+    emoji: Option<&bsky_render::EmojiAtlas>,
+    idx: usize,
+) -> Option<TapAction> {
+    let author_rect = Rect::new(
+        0.0,
+        (row_y + ROW_PAD_Y) as f32,
+        TEXT_LEFT as f32,
+        AVATAR_SIZE as f32,
+    );
+    if touches.iter().any(|&(x, y)| author_rect.contains(x, y)) {
+        return Some(TapAction::OpenProfile(
+            post.post.author.handle.as_str().to_string(),
+        ));
+    }
+    let counts_y = row_y + row_h - FOOTER_H + 4;
+    let counts_h = 24.0;
+    let likes_rect = Rect::new(0.0, counts_y as f32, 280.0, counts_h);
+    let reposts_rect = Rect::new(280.0, counts_y as f32, 280.0, counts_h);
+    if touches.iter().any(|&(x, y)| likes_rect.contains(x, y)) {
+        return Some(TapAction::ToggleLike(idx));
+    }
+    if touches.iter().any(|&(x, y)| reposts_rect.contains(x, y)) {
+        return Some(TapAction::ToggleRepost(idx));
+    }
+    if let Some(target) = crate::embeds::video_in_embed(
+        post.post.embed.as_ref(),
+        post.post.author.did.as_ref(),
+    ) {
+        if let Some((ey, eh)) = crate::embeds::embed_rect(frame, font, post, row_y, emoji) {
+            let er = Rect::new(
+                TEXT_LEFT as f32,
+                ey as f32,
+                (SCREEN_WIDTH - TEXT_LEFT - ROW_PAD_X) as f32,
+                eh as f32,
+            );
+            if touches.iter().any(|&(x, y)| er.contains(x, y)) {
+                return Some(TapAction::OpenVideo(target));
+            }
+        }
+    }
+    if let Some(quote_uri) = crate::embeds::quote_uri_in_embed(post.post.embed.as_ref()) {
+        if let Some((ey, eh)) = crate::embeds::embed_rect(frame, font, post, row_y, emoji) {
+            let embed_rect = Rect::new(
+                TEXT_LEFT as f32,
+                ey as f32,
+                (SCREEN_WIDTH - TEXT_LEFT - ROW_PAD_X) as f32,
+                eh as f32,
+            );
+            if touches.iter().any(|&(x, y)| embed_rect.contains(x, y)) {
+                return Some(TapAction::OpenThread(quote_uri));
+            }
+        }
+    }
+    let body_rect = Rect::new(
+        TEXT_LEFT as f32,
+        (row_y + ROW_PAD_Y) as f32,
+        (SCREEN_WIDTH - TEXT_LEFT - ROW_PAD_X) as f32,
+        (row_h - ROW_PAD_Y - FOOTER_H) as f32,
+    );
+    if touches.iter().any(|&(x, y)| body_rect.contains(x, y)) {
+        return Some(TapAction::OpenThread(post.post.uri.clone()));
+    }
+    None
 }
 
 /// Sentinel URI used while a CreateLike / CreateRepost is in flight.
@@ -380,7 +485,9 @@ impl Screen for TimelineScreen {
                 self.dispatched = true;
             }
         }
-        if !self.saved_feeds_dispatched {
+        // Pushed instances target a specific feed and skip the saved-
+        // feeds pill row, so no need to fetch the user's saved feeds.
+        if !self.saved_feeds_dispatched && !self.is_pushed {
             if let Some(worker) = ctx.worker {
                 worker.send(WorkRequest::FetchSavedFeeds);
                 self.saved_feeds_dispatched = true;
@@ -664,15 +771,21 @@ impl Screen for TimelineScreen {
         }
 
         // ─── 7. Pill row (drawn after posts so it covers any row that
-        //        scrolled up into its zone). Hit-tested below. ─────────
-        let pill_tap_idx = draw_pill_row(
-            frame,
-            font,
-            &self.saved_feeds,
-            &self.current_source,
-            &mut self.pill_buttons,
-            ctx,
-        );
+        //        scrolled up into its zone). Hit-tested below. Pushed
+        //        instances (e.g. opened from ProfileScreen's Feeds tab)
+        //        skip the pill row since they target a single feed. ───
+        let pill_tap_idx = if self.is_pushed {
+            None
+        } else {
+            draw_pill_row(
+                frame,
+                font,
+                &self.saved_feeds,
+                &self.current_source,
+                &mut self.pill_buttons,
+                ctx,
+            )
+        };
 
         // ─── 8. Sticky header (drawn after pill row so it covers any
         //        pill content that exceeds its bounds). ──────────────────
@@ -697,8 +810,13 @@ impl Screen for TimelineScreen {
         }
 
         // ─── 8. Tab bar (last — covers any row that scrolled into its
-        //        zone). Tap → switch top-level. ─────────────────────────
-        if let Some(target) = self.tab_bar.render(frame, font, ctx) {
+        //        zone). Tap → switch top-level. Pushed instances skip
+        //        the tab bar; CIRCLE pops back to whatever pushed us.
+        if self.is_pushed {
+            if ctx.pad.just_pressed(buttons::CIRCLE) {
+                return ScreenAction::Pop;
+            }
+        } else if let Some(target) = self.tab_bar.render(frame, font, ctx) {
             return ScreenAction::SwitchTab(target);
         }
 
@@ -854,7 +972,7 @@ impl Screen for TimelineScreen {
     }
 
     fn top_level(&self) -> Option<TopLevel> {
-        Some(TopLevel::Home)
+        if self.is_pushed { None } else { Some(TopLevel::Home) }
     }
 
     fn handle_worker_response(&mut self, resp: WorkResponse) {
@@ -963,6 +1081,10 @@ impl Screen for TimelineScreen {
             WorkResponse::SearchActors(_) | WorkResponse::SearchPosts(_) => {}
             // Video blob responses belong to VideoPlayerScreen.
             WorkResponse::VideoBlob { .. } => {}
+            // Profile-tab content belongs to ProfileScreen.
+            WorkResponse::ActorFeeds { .. }
+            | WorkResponse::ActorLists { .. }
+            | WorkResponse::ActorStarterPacks { .. } => {}
         }
     }
 }

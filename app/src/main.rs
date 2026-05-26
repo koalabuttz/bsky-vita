@@ -148,7 +148,20 @@ fn main() {
                 } = &resp
                 {
                     match texture_cache.insert(url.clone(), b) {
-                        Ok(()) => resp,
+                        Ok(()) => {
+                            // Apply circular alpha mask to avatars so
+                            // they composite cleanly over arbitrary
+                            // backgrounds (banner images, in particular).
+                            // Bsky's avatar CDN URLs always go through
+                            // the avatar-thumbnail/ path; that's our
+                            // signal.
+                            if url.contains("/avatar_thumbnail/") {
+                                if let Some(tex) = texture_cache.get(url) {
+                                    tex.apply_circular_mask();
+                                }
+                            }
+                            resp
+                        }
                         Err(e) => {
                             bsky_log::log!("decode failed for {url}: {e}");
                             WorkResponse::Image {

@@ -85,6 +85,12 @@ unsafe extern "C" {
         h: c_float,
         color: c_uint,
     );
+    pub fn vita2d_draw_fill_circle(
+        x: c_float,
+        y: c_float,
+        radius: c_float,
+        color: c_uint,
+    );
 
     // PGF system font (Sony's bitmap font; covers Latin + Japanese + Chinese
     // + Korean depending on which language packs are loaded).

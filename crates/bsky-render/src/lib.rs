@@ -425,6 +425,42 @@ impl Texture {
         self.height
     }
 
+    /// In-place mask the texture's alpha channel so pixels outside the
+    /// inscribed circle become transparent. Used for avatars: lets us
+    /// composite a circular avatar over arbitrary backgrounds (e.g. a
+    /// banner image) without needing a per-background mask overlay.
+    /// Assumes 4-byte-per-pixel A8B8G8R8 / R8G8B8A8 layout — true for
+    /// any vita2d texture loaded via the JPEG / PNG paths.
+    #[cfg(target_os = "vita")]
+    pub fn apply_circular_mask(&self) {
+        unsafe {
+            let stride = ffi::vita2d_texture_get_stride(self.ptr.as_ptr()) as usize;
+            let base = ffi::vita2d_texture_get_datap(self.ptr.as_ptr()) as *mut u8;
+            if base.is_null() || stride == 0 {
+                return;
+            }
+            let w = self.width as usize;
+            let h = self.height as usize;
+            let cx = w as f32 / 2.0;
+            let cy = h as f32 / 2.0;
+            let r = (w.min(h) as f32) / 2.0;
+            let r2 = r * r;
+            for y in 0..h {
+                let row = base.add(y * stride);
+                for x in 0..w {
+                    let dx = x as f32 + 0.5 - cx;
+                    let dy = y as f32 + 0.5 - cy;
+                    if dx * dx + dy * dy > r2 {
+                        // Pixel byte offset 3 = alpha (A8B8G8R8: A in MSB).
+                        *row.add(x * 4 + 3) = 0;
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "vita"))]
+    pub fn apply_circular_mask(&self) {}
+
     #[cfg(target_os = "vita")]
     fn wrap_raw(
         p: *mut ffi::vita2d_texture,
@@ -613,6 +649,21 @@ impl<'r> Frame<'r> {
         #[cfg(not(target_os = "vita"))]
         {
             let _ = (x, y, w, h, color);
+        }
+    }
+
+    /// Filled circle centered at `(cx, cy)` with `radius` pixels.
+    /// Useful as a circular backplate behind a circular-masked avatar
+    /// when the underlying surface is varied (e.g. a banner image)
+    /// and a square backplate would show as visible corners.
+    pub fn fill_circle(&mut self, cx: f32, cy: f32, radius: f32, color: Color) {
+        #[cfg(target_os = "vita")]
+        unsafe {
+            ffi::vita2d_draw_fill_circle(cx, cy, radius, color.raw());
+        }
+        #[cfg(not(target_os = "vita"))]
+        {
+            let _ = (cx, cy, radius, color);
         }
     }
 

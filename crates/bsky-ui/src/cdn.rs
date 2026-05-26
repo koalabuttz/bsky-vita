@@ -22,6 +22,14 @@ pub fn avatar_thumbnail_jpeg(url: &str) -> String {
     ensure_jpeg(&path)
 }
 
+/// Banner-URL transform. Bluesky banners live at
+/// `https://cdn.bsky.app/img/banner/plain/...`; there's no thumbnail
+/// variant published, so we just coerce the format to JPEG. Non-bsky
+/// URLs pass through unchanged.
+pub fn banner_jpeg(url: &str) -> String {
+    ensure_jpeg(url)
+}
+
 /// Force a `@jpeg` suffix on the URL if it doesn't already have an
 /// explicit format selector. The Bluesky CDN uses `@jpeg` / `@png` /
 /// `@webp` to pick the response encoding; vita2d only decodes JPEG and
