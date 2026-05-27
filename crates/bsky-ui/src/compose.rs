@@ -33,9 +33,36 @@ use crate::widget::{button, ButtonState, Rect, UiCtx};
 /// composing emoji-heavy posts may see slight over-/under-counts.
 const POST_LIMIT: usize = 300;
 
-/// Max size of the attached-image preview texture in the compose strip.
-const PREVIEW_W: u32 = 152;
-const PREVIEW_H: u32 = 100;
+/// Bluesky's max images per post.
+const MAX_IMAGES: usize = 4;
+/// Alt-text length cap for the IME.
+const ALT_LIMIT: usize = 1000;
+
+/// Attachment-strip thumbnail size.
+const STRIP_THUMB_W: u32 = 104;
+const STRIP_THUMB_H: u32 = 78;
+/// Horizontal pitch between strip cells.
+const STRIP_PITCH: i32 = 112;
+
+/// One attached image. `bytes`/`preview` are `None` while the file read +
+/// decode are in flight (camera attachments arrive fully-loaded).
+struct Attachment {
+    /// Match key for the in-flight `ReadImageFile` response (the file
+    /// path), or a synthetic name for camera shots. Also the strip label.
+    key: String,
+    /// Upload-ready bytes (already run through `fit_for_upload`).
+    bytes: Option<Vec<u8>>,
+    mime: String,
+    alt: String,
+    /// Downscaled strip thumbnail.
+    preview: Option<Texture>,
+}
+
+impl Attachment {
+    fn loaded(&self) -> bool {
+        self.bytes.is_some()
+    }
+}
 
 /// Upload byte cap (bsky.social rejects larger image blobs). Images over
 /// this are downscaled + re-encoded to JPEG before upload.
@@ -76,7 +103,6 @@ pub struct ComposeScreen {
     post_btn: ButtonState,
     text_area_btn: ButtonState,
     add_image_btn: ButtonState,
-    remove_img_btn: ButtonState,
     camera_btn: ButtonState,
     /// Modal file picker; `Some` while the user is choosing an image.
     picker: Option<FilePicker>,
@@ -87,23 +113,22 @@ pub struct ComposeScreen {
     /// `wait_rendering_done`, so its frame textures aren't freed in the
     /// frame they were drawn (GPU use-after-free).
     pending_camera_close: bool,
-    /// Path of the chosen image (the upload source; step 5 reads + uploads
-    /// these bytes).
-    attached_path: Option<String>,
-    /// Decoded preview of the attached image (downscaled). `None` while
-    /// loading or if decode failed.
-    preview: Option<Texture>,
-    /// Upload-ready bytes of the attached image (downscaled + re-encoded
-    /// if the source was oversized). Kept for the full-screen preview and
-    /// the upload. `None` when nothing is attached.
-    attached_bytes: Option<Vec<u8>>,
-    /// MIME type for `attached_bytes` (image/jpeg or image/png).
-    attached_mime: String,
-    /// Full-screen image-preview modal: tapping the thumbnail opens it.
-    viewing_full: bool,
+    /// Attached images (≤ `MAX_IMAGES`), in order.
+    attachments: Vec<Attachment>,
+    /// Index queued for removal next frame (deferred so its thumbnail
+    /// texture isn't freed in the frame it was drawn — GPU use-after-free).
+    pending_remove: Option<usize>,
+    /// Per-strip-cell tap state (thumbnail body / remove).
+    thumb_btns: [ButtonState; MAX_IMAGES],
+    remove_btns: [ButtonState; MAX_IMAGES],
+    /// Index of the attachment shown in the full-screen modal, if any.
+    viewing: Option<usize>,
+    /// Decoded screen-fit texture for the `viewing` attachment.
     full_tex: Option<Texture>,
-    preview_btn: ButtonState,
     full_close_btn: ButtonState,
+    edit_alt_btn: ButtonState,
+    /// True while the IME is collecting alt text (vs. body text).
+    editing_alt: bool,
     /// Set to `true` by `handle_worker_response` on a successful post.
     /// The next `frame()` returns `Pop`.
     done: bool,
@@ -125,19 +150,19 @@ impl ComposeScreen {
             post_btn: ButtonState::default(),
             text_area_btn: ButtonState::default(),
             add_image_btn: ButtonState::default(),
-            remove_img_btn: ButtonState::default(),
             camera_btn: ButtonState::default(),
             picker: None,
             camera: None,
             pending_camera_close: false,
-            attached_path: None,
-            preview: None,
-            attached_bytes: None,
-            attached_mime: String::new(),
-            viewing_full: false,
+            attachments: Vec::new(),
+            pending_remove: None,
+            thumb_btns: Default::default(),
+            remove_btns: Default::default(),
+            viewing: None,
             full_tex: None,
-            preview_btn: ButtonState::default(),
             full_close_btn: ButtonState::default(),
+            edit_alt_btn: ButtonState::default(),
+            editing_alt: false,
             done: false,
         }
     }
@@ -153,13 +178,30 @@ impl ComposeScreen {
         {
             return false;
         }
-        // If an image is attached, hold Post until its bytes have loaded
-        // (otherwise we'd post without the intended image).
-        if self.attached_path.is_some() && self.attached_bytes.is_none() {
+        // Hold Post until every attachment's bytes have loaded.
+        if self.attachments.iter().any(|a| !a.loaded()) {
             return false;
         }
-        // Post needs text OR an image.
-        n > 0 || self.attached_path.is_some()
+        // Post needs text OR at least one image.
+        n > 0 || !self.attachments.is_empty()
+    }
+
+    /// Decode the screen-fit texture for the currently-`viewing`
+    /// attachment (reused while open).
+    fn ensure_full_tex(&mut self) {
+        if self.full_tex.is_some() {
+            return;
+        }
+        if let Some(i) = self.viewing {
+            if let Some(bytes) = self.attachments.get(i).and_then(|a| a.bytes.as_ref()) {
+                self.full_tex = Texture::decode_scaled(
+                    bytes,
+                    SCREEN_WIDTH as u32,
+                    (SCREEN_HEIGHT - FULLVIEW_BAR_H) as u32,
+                )
+                .ok();
+            }
+        }
     }
 }
 
@@ -187,21 +229,56 @@ impl Screen for ComposeScreen {
             self.pending_camera_close = false;
         }
 
+        // ─── 0a3. Deferred attachment removal: its thumbnail was drawn
+        //         last frame, so free it now (after the GPU consumed that
+        //         frame), not in the frame the Remove button was tapped. ──
+        if let Some(i) = self.pending_remove.take() {
+            bsky_render::wait_rendering_done();
+            if i < self.attachments.len() {
+                self.attachments.remove(i);
+            }
+        }
+
+        // ─── 0a4. Drain IME results (body OR alt text). Before the modals
+        //         so it runs even while the full-view modal + alt IME are
+        //         up. ──────────────────────────────────────────────────────
+        match ime.poll() {
+            ImeState::Finished(s) => {
+                if self.editing_alt {
+                    if let Some(a) = self.viewing.and_then(|i| self.attachments.get_mut(i)) {
+                        a.alt = s;
+                    }
+                    self.editing_alt = false;
+                } else {
+                    self.text = s;
+                }
+                ime.close();
+            }
+            ImeState::Cancelled | ImeState::Aborted => {
+                self.editing_alt = false;
+                ime.close();
+            }
+            _ => {}
+        }
+
         // ─── 0b. Modal file picker takes over the whole frame. ─────────
         if self.picker.is_some() {
             match self.picker.as_mut().unwrap().render(frame, font, ctx) {
                 Some(PickResult::Picked(path)) => {
-                    // Request the full bytes to build a preview (and, in
-                    // step 5, to upload). Keyed by path → arrives via
-                    // handle_worker_response once the picker is closed.
-                    self.preview = None;
-                    self.attached_bytes = None;
-                    self.attached_mime.clear();
-                    self.full_tex = None; // discard prior image's full view
-                    if let Some(worker) = ctx.worker {
-                        worker.send(WorkRequest::ReadImageFile { path: path.clone() });
+                    // Append a loading attachment + request its bytes
+                    // (matched back by `key` in handle_worker_response).
+                    if self.attachments.len() < MAX_IMAGES {
+                        if let Some(worker) = ctx.worker {
+                            worker.send(WorkRequest::ReadImageFile { path: path.clone() });
+                        }
+                        self.attachments.push(Attachment {
+                            key: path,
+                            bytes: None,
+                            mime: String::new(),
+                            alt: String::new(),
+                            preview: None,
+                        });
                     }
-                    self.attached_path = Some(path);
                     self.picker = None;
                 }
                 Some(PickResult::Cancelled) => self.picker = None,
@@ -215,11 +292,17 @@ impl Screen for ComposeScreen {
             match self.camera.as_mut().unwrap().render(frame, font, ctx) {
                 Some(CameraResult::Confirmed(jpeg)) => {
                     // Camera JPEG is already small + in-spec; no fit needed.
-                    self.preview = Texture::decode_scaled(&jpeg, PREVIEW_W, PREVIEW_H).ok();
-                    self.attached_path = Some("camera.jpg".to_string());
-                    self.attached_mime = "image/jpeg".to_string();
-                    self.attached_bytes = Some(jpeg);
-                    self.full_tex = None;
+                    if self.attachments.len() < MAX_IMAGES {
+                        let preview =
+                            Texture::decode_scaled(&jpeg, STRIP_THUMB_W, STRIP_THUMB_H).ok();
+                        self.attachments.push(Attachment {
+                            key: "camera.jpg".to_string(),
+                            bytes: Some(jpeg),
+                            mime: "image/jpeg".to_string(),
+                            alt: String::new(),
+                            preview,
+                        });
+                    }
                     self.pending_camera_close = true;
                 }
                 Some(CameraResult::Cancelled) => self.pending_camera_close = true,
@@ -228,8 +311,11 @@ impl Screen for ComposeScreen {
             return ScreenAction::None;
         }
 
-        // ─── 0c. Full-screen image preview modal. ──────────────────────
-        if self.viewing_full {
+        // ─── 0c. Full-screen attachment preview + alt-text editing. ────
+        if let Some(vi) = self.viewing {
+            self.ensure_full_tex();
+            let band_h = 56;
+            let band_y = SCREEN_HEIGHT - band_h;
             frame.fill_rect(
                 0.0,
                 0.0,
@@ -238,49 +324,65 @@ impl Screen for ComposeScreen {
                 bsky_render::Color::rgb(0x00, 0x00, 0x00),
             );
             if let Some(tex) = &self.full_tex {
-                // Center in the area BELOW the close bar so the bar never
-                // covers the image.
+                // Center between the close bar (top) and the alt band.
+                let avail_h = band_y - FULLVIEW_BAR_H;
                 let dx = (SCREEN_WIDTH - tex.width()) / 2;
-                let dy = FULLVIEW_BAR_H + (SCREEN_HEIGHT - FULLVIEW_BAR_H - tex.height()) / 2;
+                let dy = FULLVIEW_BAR_H + (avail_h - tex.height()) / 2;
                 frame.draw_texture(tex, dx as f32, dy as f32);
             }
+            // Top bar.
             frame.fill_rect(0.0, 0.0, SCREEN_WIDTH as f32, FULLVIEW_BAR_H as f32, theme::FIELD_BG);
-            frame.draw_text(
+            frame.draw_text(font, 12, 21, theme::TEXT_PRIMARY, 0.9, "O / X  close");
+            // Alt-text band + Edit button.
+            let alt = self.attachments.get(vi).map(|a| a.alt.clone()).unwrap_or_default();
+            frame.fill_rect(0.0, band_y as f32, SCREEN_WIDTH as f32, band_h as f32, theme::FIELD_BG);
+            let (alt_text, alt_color): (&str, _) = if alt.is_empty() {
+                ("No alt text", theme::TEXT_MUTED)
+            } else {
+                (alt.as_str(), theme::TEXT_PRIMARY)
+            };
+            frame.draw_text_wrapped(font, 12, band_y + 20, SCREEN_WIDTH - 160, alt_color, 0.8, alt_text);
+            let interactive = !ime.is_active();
+            let edit_label = if alt.is_empty() { "Add alt" } else { "Edit alt" };
+            if button(
+                frame,
                 font,
-                12,
-                21,
-                theme::TEXT_PRIMARY,
-                0.9,
-                "Tap, or press O / X, to close",
-            );
-            let pressed_now = !ctx.touches.is_empty();
-            let tapped =
-                self.full_close_btn.pressed_last && !pressed_now && ctx.touches.is_empty();
-            self.full_close_btn.pressed_last = pressed_now;
-            if tapped
-                || ctx.pad.just_pressed(buttons::CIRCLE)
-                || ctx.pad.just_pressed(buttons::CROSS)
-            {
-                // Keep `full_tex` alive — freeing it now (same frame it was
-                // just drawn) makes the GPU read freed memory → GPUCRASH.
-                // It's freed later on Remove/Change, in a frame where it
-                // isn't drawn. Reused if the user reopens the full view.
-                self.viewing_full = false;
-                self.full_close_btn.pressed_last = false;
+                Rect::new((SCREEN_WIDTH - 140) as f32, (band_y + 8) as f32, 130.0, 40.0),
+                edit_label,
+                &mut self.edit_alt_btn,
+                ctx,
+                interactive,
+            ) {
+                self.editing_alt = true;
+                let _ = ime.open(
+                    "Alt text",
+                    ImeMode::Default,
+                    TextBoxMode::Default,
+                    ALT_LIMIT as u32,
+                    &alt,
+                );
+            }
+            // Close on a tap in the image area (above the alt band, below
+            // the bar), or CIRCLE/CROSS — but only when the IME isn't up.
+            if interactive {
+                let in_image = ctx
+                    .touches
+                    .iter()
+                    .any(|t| t.y > FULLVIEW_BAR_H && t.y < band_y);
+                let tapped =
+                    self.full_close_btn.pressed_last && !in_image && ctx.touches.is_empty();
+                self.full_close_btn.pressed_last = in_image;
+                if tapped
+                    || ctx.pad.just_pressed(buttons::CIRCLE)
+                    || ctx.pad.just_pressed(buttons::CROSS)
+                {
+                    // Keep full_tex alive (drawn this frame); freed on the
+                    // next thumbnail-open or attachment removal.
+                    self.viewing = None;
+                    self.full_close_btn.pressed_last = false;
+                }
             }
             return ScreenAction::None;
-        }
-
-        // ─── 1. Drain pending IME result into the text buffer. ─────────
-        match ime.poll() {
-            ImeState::Finished(s) => {
-                self.text = s;
-                ime.close();
-            }
-            ImeState::Cancelled | ImeState::Aborted => {
-                ime.close();
-            }
-            _ => {}
         }
 
         // ─── 2. CIRCLE → Pop (Cancel). ─────────────────────────────────
@@ -343,17 +445,18 @@ impl Screen for ComposeScreen {
         );
         if post_clicked {
             if let Some(worker) = ctx.worker {
-                // Build the image attachment from the loaded bytes (mime by
-                // extension). can_post() guarantees bytes are present if a
-                // path is attached.
-                let images = match &self.attached_bytes {
-                    Some(bytes) => vec![ComposedImage {
-                        bytes: bytes.clone(),
-                        mime: self.attached_mime.clone(),
-                        alt: String::new(),
-                    }],
-                    None => Vec::new(),
-                };
+                // All attachments are loaded (can_post guarantees it).
+                let images: Vec<ComposedImage> = self
+                    .attachments
+                    .iter()
+                    .filter_map(|a| {
+                        a.bytes.as_ref().map(|b| ComposedImage {
+                            bytes: b.clone(),
+                            mime: a.mime.clone(),
+                            alt: a.alt.clone(),
+                        })
+                    })
+                    .collect();
                 worker.send(WorkRequest::CreatePost {
                     text: self.text.clone(),
                     reply_to: self.reply_to.clone(),
@@ -382,9 +485,9 @@ impl Screen for ComposeScreen {
         // Reserve a strip below the text area for the image attachment
         // controls (Phase 7).
         let counter_h = 32;
-        // Tall enough for the preview only when something is attached; a
-        // single Add-image button row otherwise (no dead space).
-        let attach_h = if self.attached_path.is_some() { 112 } else { 44 };
+        // Strip is a thumbnail row when images are attached; a single
+        // Add/Camera button row otherwise (no dead space).
+        let attach_h = if self.attachments.is_empty() { 44 } else { 94 };
         let area_h = SCREEN_HEIGHT - content_top - counter_h - 12 - attach_h - 8;
         let area_rect = Rect::new(
             12.0,
@@ -442,106 +545,58 @@ impl Screen for ComposeScreen {
             );
         }
 
-        // ─── 5b. Attachment area: Add/Change + preview + Remove. ───────
+        // ─── 5b. Attachment strip: thumbnails (+ALT/✕) then Add/Camera. ─
         let attach_y = content_top + area_h + 8;
-        if self.attached_path.is_none() {
-            // Two source choices: file browser or camera.
-            if button(
-                frame,
-                font,
-                Rect::new(12.0, attach_y as f32, 132.0, 40.0),
-                "Choose file",
-                &mut self.add_image_btn,
-                ctx,
-                interactive,
-            ) {
+        let tw = STRIP_THUMB_W as i32;
+        let th = STRIP_THUMB_H as i32;
+        let mut open_view: Option<usize> = None;
+        let mut request_remove: Option<usize> = None;
+        for i in 0..self.attachments.len() {
+            let cell_x = 12 + (i as i32) * STRIP_PITCH;
+            // Thumbnail (or a loading placeholder).
+            if let Some(tex) = self.attachments[i].preview.as_ref() {
+                frame.draw_texture(tex, cell_x as f32, attach_y as f32);
+            } else {
+                frame.fill_rect(cell_x as f32, attach_y as f32, tw as f32, th as f32, theme::FIELD_BG);
+                frame.draw_text(font, cell_x + 8, attach_y + th / 2, theme::TEXT_MUTED, 0.8, "…");
+            }
+            // ALT badge.
+            if !self.attachments[i].alt.is_empty() {
+                frame.fill_rect(cell_x as f32, (attach_y + th - 18) as f32, 36.0, 18.0, theme::ACCENT);
+                frame.draw_text(font, cell_x + 5, attach_y + th - 4, theme::TEXT_PRIMARY, 0.62, "ALT");
+            }
+            // Remove (top-right).
+            let rm_rect = Rect::new((cell_x + tw - 26) as f32, attach_y as f32, 26.0, 26.0);
+            if button(frame, font, rm_rect, "x", &mut self.remove_btns[i], ctx, interactive) {
+                request_remove = Some(i);
+            }
+            // Tap the thumbnail body (below the remove corner) → full view.
+            let body_rect = Rect::new(cell_x as f32, (attach_y + 26) as f32, tw as f32, (th - 26) as f32);
+            if self.attachments[i].preview.is_some()
+                && button_invisible(frame, body_rect, &mut self.thumb_btns[i], ctx, interactive)
+            {
+                open_view = Some(i);
+            }
+        }
+        // Add / Camera while under the cap.
+        if self.attachments.len() < MAX_IMAGES {
+            let bx = 12 + (self.attachments.len() as i32) * STRIP_PITCH;
+            let by = if self.attachments.is_empty() { attach_y } else { attach_y + 19 };
+            if button(frame, font, Rect::new(bx as f32, by as f32, 72.0, 40.0), "Add", &mut self.add_image_btn, ctx, interactive) {
                 self.picker = Some(FilePicker::new());
             }
-            if button(
-                frame,
-                font,
-                Rect::new(152.0, attach_y as f32, 110.0, 40.0),
-                "Camera",
-                &mut self.camera_btn,
-                ctx,
-                interactive,
-            ) {
+            if button(frame, font, Rect::new((bx + 80) as f32, by as f32, 100.0, 40.0), "Camera", &mut self.camera_btn, ctx, interactive) {
                 self.camera = Some(CameraCapture::new());
             }
-        } else if button(
-            frame,
-            font,
-            Rect::new(12.0, attach_y as f32, 150.0, 40.0),
-            "Change image",
-            &mut self.add_image_btn,
-            ctx,
-            interactive,
-        ) {
-            self.picker = Some(FilePicker::new());
         }
-        // Owned clone so we don't hold a borrow on self across the Remove
-        // mutation below.
-        if let Some(path) = self.attached_path.clone() {
-            if button(
-                frame,
-                font,
-                Rect::new(12.0, (attach_y + 48) as f32, 150.0, 40.0),
-                "Remove",
-                &mut self.remove_img_btn,
-                ctx,
-                interactive,
-            ) {
-                self.attached_path = None;
-                self.preview = None;
-                self.attached_bytes = None;
-                self.attached_mime.clear();
-                self.full_tex = None; // safe: not in full-view this frame
-            } else {
-                let px = 176;
-                let has_preview = self.preview.is_some();
-                if let Some(tex) = &self.preview {
-                    frame.draw_texture(tex, px as f32, attach_y as f32);
-                } else {
-                    frame.draw_text(font, px, attach_y + 24, theme::TEXT_MUTED, 0.9, "loading preview…");
-                }
-                // Tap the preview → full-screen view.
-                let preview_rect =
-                    Rect::new(px as f32, attach_y as f32, PREVIEW_W as f32, PREVIEW_H as f32);
-                if has_preview
-                    && button_invisible(frame, preview_rect, &mut self.preview_btn, ctx, interactive)
-                {
-                    // Decode the full-size texture once; reuse it on reopen.
-                    if self.full_tex.is_none() {
-                        if let Some(b) = &self.attached_bytes {
-                            self.full_tex = Texture::decode_scaled(
-                                b,
-                                SCREEN_WIDTH as u32,
-                                (SCREEN_HEIGHT - FULLVIEW_BAR_H) as u32,
-                            )
-                            .ok();
-                        }
-                    }
-                    self.viewing_full = true;
-                }
-                let name = path.rsplit('/').next().unwrap_or(path.as_str());
-                let shown: String = name.chars().take(40).collect();
-                frame.draw_text(
-                    font,
-                    px + PREVIEW_W as i32 + 14,
-                    attach_y + 24,
-                    theme::TEXT_PRIMARY,
-                    0.9,
-                    &shown,
-                );
-                frame.draw_text(
-                    font,
-                    px + PREVIEW_W as i32 + 14,
-                    attach_y + 50,
-                    theme::TEXT_MUTED,
-                    0.8,
-                    "tap to view full size",
-                );
-            }
+        if let Some(i) = request_remove {
+            self.pending_remove = Some(i);
+        }
+        if let Some(i) = open_view {
+            // Switching attachments: drop the (not-drawn-this-frame) old
+            // full_tex so ensure_full_tex re-decodes for `i`.
+            self.full_tex = None;
+            self.viewing = Some(i);
         }
 
         // ─── 6. Char counter + Submitting/Error overlays. ──────────────
@@ -589,17 +644,23 @@ impl Screen for ComposeScreen {
     fn handle_worker_response(&mut self, resp: WorkResponse) {
         // Route local-file image reads (picker thumbnails) into the picker.
         if let WorkResponse::Image { url, bytes } = &resp {
+            // Picker thumbnail (if the picker is open).
             if let Some(picker) = self.picker.as_mut() {
                 picker.on_image(url, bytes);
-            } else if self.attached_path.as_deref() == Some(url.as_str()) {
-                // Bytes for the attached image → build the compose preview.
-                if let Ok(b) = bytes {
-                    // Downscale + re-encode if oversized, so the upload
-                    // stays under the blob cap.
+            }
+            // Bytes for a loading attachment (matched by key) → fit +
+            // decode its strip thumbnail.
+            if let Ok(b) = bytes {
+                if let Some(att) = self
+                    .attachments
+                    .iter_mut()
+                    .find(|a| !a.loaded() && a.key == *url)
+                {
                     let (upload_bytes, mime) = fit_for_upload(b, url);
-                    self.preview = Texture::decode_scaled(&upload_bytes, PREVIEW_W, PREVIEW_H).ok();
-                    self.attached_bytes = Some(upload_bytes);
-                    self.attached_mime = mime;
+                    att.preview =
+                        Texture::decode_scaled(&upload_bytes, STRIP_THUMB_W, STRIP_THUMB_H).ok();
+                    att.bytes = Some(upload_bytes);
+                    att.mime = mime;
                 }
             }
             return;
