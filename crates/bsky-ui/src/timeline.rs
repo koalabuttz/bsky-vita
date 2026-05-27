@@ -302,6 +302,10 @@ pub(crate) enum TapAction {
     ToggleLike(usize),
     ToggleRepost(usize),
     OpenVideo(crate::embeds::VideoTarget),
+    OpenImage {
+        images: Vec<crate::embeds::ViewerImage>,
+        index: usize,
+    },
 }
 
 /// Hit-test one post row at `(0..SCREEN_WIDTH) × (row_y..row_y+row_h)`
@@ -370,6 +374,17 @@ pub(crate) fn detect_post_tap_action(
             );
             if touches.iter().any(|&(x, y)| embed_rect.contains(x, y)) {
                 return Some(TapAction::OpenThread(quote_uri));
+            }
+        }
+    }
+    // Image embed → open the tapped image in the full-screen viewer.
+    if let Some((images, rects)) = crate::embeds::image_tap_cells(frame, font, post, row_y, emoji) {
+        for (i, &(rx, ry, rw, rh)) in rects.iter().enumerate() {
+            if touches
+                .iter()
+                .any(|&(x, y)| x >= rx && x < rx + rw && y >= ry && y < ry + rh)
+            {
+                return Some(TapAction::OpenImage { images, index: i });
             }
         }
     }
@@ -915,6 +930,21 @@ impl Screen for TimelineScreen {
                                 }
                             }
                         }
+                        // Image embed → full-screen viewer (before the body
+                        // fallback so a tap on an image opens it, not the
+                        // thread).
+                        if let Some((images, rects)) =
+                            crate::embeds::image_tap_cells(frame, font, post, y_probe, ctx.emoji)
+                        {
+                            if let Some(i) = rects.iter().position(|&(rx, ry, rw, rh)| {
+                                touches
+                                    .iter()
+                                    .any(|&(x, y)| x >= rx && x < rx + rw && y >= ry && y < ry + rh)
+                            }) {
+                                tap_action = Some(TapAction::OpenImage { images, index: i });
+                                break;
+                            }
+                        }
                         // Body region: anywhere in the row that isn't
                         // the author region, counts row, or a quote
                         // embed → open thread for *this* post.
@@ -963,6 +993,11 @@ impl Screen for TimelineScreen {
                         target.did,
                         target.cid,
                     )));
+                }
+                Some(TapAction::OpenImage { images, index }) => {
+                    return ScreenAction::Push(Box::new(
+                        crate::image_viewer::ImageViewerScreen::new(images, index),
+                    ));
                 }
                 None => {}
             }

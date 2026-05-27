@@ -179,6 +179,83 @@ pub(crate) fn embed_image_urls(
     out
 }
 
+/// One image for the full-screen viewer: CDN URLs (jpeg-coerced) + alt.
+#[derive(Clone, Debug)]
+pub struct ViewerImage {
+    pub thumb: String,
+    pub fullsize: String,
+    pub alt: String,
+}
+
+/// If the post's embed is a plain images embed, return its viewer images
+/// paired with each cell's absolute screen rect `(x, y, w, h)` — mirrors
+/// `draw_image_grid`'s n=1..4 layout so a tap maps to the right image.
+/// (recordWithMedia images are out of scope for v1.)
+pub(crate) fn image_tap_cells(
+    frame: &Frame,
+    font: &Font,
+    post: &FeedViewPost,
+    row_top: i32,
+    emoji: Option<&EmojiAtlas>,
+) -> Option<(Vec<ViewerImage>, Vec<(i32, i32, i32, i32)>)> {
+    let embed = post.post.embed.as_ref()?;
+    let Union::Refs(refs) = embed else { return None };
+    let PostViewEmbedRefs::AppBskyEmbedImagesView(v) = refs else {
+        return None;
+    };
+    let n = v.images.len();
+    if n == 0 {
+        return None;
+    }
+    let (ey, _eh) = embed_rect(frame, font, post, row_top, emoji)?;
+    let x = TEXT_LEFT;
+    let mut rects: Vec<(i32, i32, i32, i32)> = Vec::with_capacity(n);
+    match n {
+        1 => {
+            let img = &v.images[0];
+            let h = measure_aspect_image(img.aspect_ratio.as_ref());
+            let aspect = aspect_or_default(img.aspect_ratio.as_ref());
+            let w = ((h as f32 * aspect) as i32).min(INNER_W);
+            rects.push((x, ey, w, h));
+        }
+        2 => {
+            let cw = (INNER_W - GRID_GAP) / 2;
+            rects.push((x, ey, cw, GRID_ROW_H));
+            rects.push((x + cw + GRID_GAP, ey, cw, GRID_ROW_H));
+        }
+        3 => {
+            let cw = (INNER_W - GRID_GAP * 2) / 3;
+            for i in 0..3 {
+                rects.push((x + i * (cw + GRID_GAP), ey, cw, GRID_ROW_H));
+            }
+        }
+        _ => {
+            let cw = (INNER_W - GRID_GAP) / 2;
+            for i in 0..4 {
+                let row = i / 2;
+                let col = i % 2;
+                rects.push((
+                    x + col * (cw + GRID_GAP),
+                    ey + row * (GRID_4_CELL_H + GRID_GAP),
+                    cw,
+                    GRID_4_CELL_H,
+                ));
+            }
+        }
+    }
+    let images = v
+        .images
+        .iter()
+        .take(rects.len())
+        .map(|img| ViewerImage {
+            thumb: crate::cdn::ensure_jpeg(&img.thumb),
+            fullsize: crate::cdn::ensure_jpeg(&img.fullsize),
+            alt: img.alt.clone(),
+        })
+        .collect();
+    Some((images, rects))
+}
+
 /// (`did`, `cid`) target for a tappable video embed, or `None` when
 /// the embed isn't (or doesn't contain) a video. `did` is the post
 /// author's DID — `getBlob` needs it to route to the right repo.

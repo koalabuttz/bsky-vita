@@ -1183,6 +1183,11 @@ impl Screen for ProfileScreen {
                                 }
                             }
                         }
+                        Some(TapAction::OpenImage { images, index }) => {
+                            tap_screen_action = Some(ScreenAction::Push(Box::new(
+                                crate::image_viewer::ImageViewerScreen::new(images, index),
+                            )));
+                        }
                         None => {}
                     }
                 }

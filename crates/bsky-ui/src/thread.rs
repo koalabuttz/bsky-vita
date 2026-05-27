@@ -245,6 +245,10 @@ impl Screen for ThreadScreen {
                 OpenProfile(String),
                 OpenThread(String),
                 OpenVideo(crate::embeds::VideoTarget),
+                OpenImage {
+                    images: Vec<crate::embeds::ViewerImage>,
+                    index: usize,
+                },
             }
             let mut tap: Option<ThreadTap> = None;
             if let ThreadState::Loaded { posts, .. } = &self.state {
@@ -301,6 +305,18 @@ impl Screen for ThreadScreen {
                                 }
                             }
                         }
+                        if let Some((images, rects)) =
+                            crate::embeds::image_tap_cells(frame, font, post, y_probe, ctx.emoji)
+                        {
+                            if let Some(i) = rects.iter().position(|&(rx, ry, rw, rh)| {
+                                touches
+                                    .iter()
+                                    .any(|&(x, y)| x >= rx && x < rx + rw && y >= ry && y < ry + rh)
+                            }) {
+                                tap = Some(ThreadTap::OpenImage { images, index: i });
+                                break;
+                            }
+                        }
                     }
                     y_probe += row_h;
                 }
@@ -324,6 +340,11 @@ impl Screen for ThreadScreen {
                         target.did,
                         target.cid,
                     )));
+                }
+                Some(ThreadTap::OpenImage { images, index }) => {
+                    return ScreenAction::Push(Box::new(
+                        crate::image_viewer::ImageViewerScreen::new(images, index),
+                    ));
                 }
                 None => {}
             }

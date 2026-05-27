@@ -5,6 +5,7 @@ pub mod cdn;
 pub mod compose;
 pub mod embeds;
 pub mod file_picker;
+pub mod image_viewer;
 pub mod login;
 pub mod notifications;
 pub mod profile;
