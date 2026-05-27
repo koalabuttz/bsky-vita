@@ -292,7 +292,14 @@ impl Screen for NotificationsScreen {
         //  - Rest of the row: reason-aware context (thread for
         //    engagement / mention / reply / quote, profile for follow).
         if !ctx.touches.is_empty() {
-            let touches: Vec<_> = ctx.touches.iter().map(|t| (t.x, t.y)).collect();
+            // Exclude the bottom tab-bar band so content taps don't fall
+            // through the bar (which is drawn on top and handles them).
+            let touches: Vec<_> = ctx
+                .touches
+                .iter()
+                .filter(|t| t.y < VIEWPORT_BOTTOM)
+                .map(|t| (t.x, t.y))
+                .collect();
             let mut tap_target: Option<NotifTapAction> = None;
             if let NotifState::Loaded { notifications, .. } = &self.state {
                 let mut y_probe = HEADER_H - self.scroll_y as i32;

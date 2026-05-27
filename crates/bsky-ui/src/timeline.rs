@@ -842,8 +842,16 @@ impl Screen for TimelineScreen {
         //        Hit-tested per-frame against current scroll position. ─
         if !ctx.touches.is_empty() {
             // Take snapshot of touches up-front so we can mutate state
-            // while iterating posts immutably.
-            let touches: Vec<_> = ctx.touches.iter().map(|t| (t.x, t.y)).collect();
+            // while iterating posts immutably. Exclude the bottom tab-bar
+            // band: the bar is drawn on top and handles those touches
+            // itself, so a content tap must not fall through to a post row
+            // that happens to extend under the bar.
+            let touches: Vec<_> = ctx
+                .touches
+                .iter()
+                .filter(|t| t.y < VIEWPORT_BOTTOM)
+                .map(|t| (t.x, t.y))
+                .collect();
             let mut tap_action: Option<TapAction> = None;
             if let TimelineState::Loaded { posts, .. } = &self.state {
                 let mut y_probe = VIEWPORT_TOP - self.scroll_y as i32;

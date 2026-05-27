@@ -483,7 +483,14 @@ impl Screen for SearchScreen {
 
         // Tap detection on result rows.
         if !ctx.touches.is_empty() {
-            let touches: Vec<_> = ctx.touches.iter().map(|t| (t.x, t.y)).collect();
+            // Exclude the bottom tab-bar band so content taps don't fall
+            // through the bar (which is drawn on top and handles them).
+            let touches: Vec<_> = ctx
+                .touches
+                .iter()
+                .filter(|t| t.y < VIEWPORT_BOTTOM)
+                .map(|t| (t.x, t.y))
+                .collect();
             let mut tap_action: Option<SearchTapAction> = None;
             let mut y_probe = RESULTS_TOP - self.scroll_y as i32;
             match &self.state {

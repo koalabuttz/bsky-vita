@@ -1124,14 +1124,18 @@ impl Screen for ProfileScreen {
                     viewport_bottom,
                 );
                 if !ctx.touches.is_empty() {
-                    // Exclude taps inside the sticky pill strip's band so
-                    // they fall through to the pill hit-test (drawn last).
-                    // Without this, a content row scrolled under the pinned
+                    // Exclude taps inside the sticky pill strip's band (top)
+                    // so they fall through to the pill hit-test (drawn last);
+                    // without this a content row scrolled under the pinned
                     // strip steals taps meant for the tabs (plan Risk #1).
+                    // Also exclude the bottom tab-bar band: on the own
+                    // profile `viewport_bottom` is SCREEN_HEIGHT - bar, so
+                    // this stops content taps from falling through the bar;
+                    // on a pushed profile it's SCREEN_HEIGHT (a no-op).
                     let touches: Vec<(i32, i32)> = ctx
                         .touches
                         .iter()
-                        .filter(|t| t.y >= pill_bottom)
+                        .filter(|t| t.y >= pill_bottom && t.y < viewport_bottom)
                         .map(|t| (t.x, t.y))
                         .collect();
                     let mut row_y = content_natural_top + y_offset;
@@ -1204,14 +1208,18 @@ impl Screen for ProfileScreen {
                 );
                 // Tap → push TimelineScreen of the tapped feed.
                 if !ctx.touches.is_empty() {
-                    // Exclude taps inside the sticky pill strip's band so
-                    // they fall through to the pill hit-test (drawn last).
-                    // Without this, a content row scrolled under the pinned
+                    // Exclude taps inside the sticky pill strip's band (top)
+                    // so they fall through to the pill hit-test (drawn last);
+                    // without this a content row scrolled under the pinned
                     // strip steals taps meant for the tabs (plan Risk #1).
+                    // Also exclude the bottom tab-bar band: on the own
+                    // profile `viewport_bottom` is SCREEN_HEIGHT - bar, so
+                    // this stops content taps from falling through the bar;
+                    // on a pushed profile it's SCREEN_HEIGHT (a no-op).
                     let touches: Vec<(i32, i32)> = ctx
                         .touches
                         .iter()
-                        .filter(|t| t.y >= pill_bottom)
+                        .filter(|t| t.y >= pill_bottom && t.y < viewport_bottom)
                         .map(|t| (t.x, t.y))
                         .collect();
                     let mut row_y = content_top;
