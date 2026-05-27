@@ -144,9 +144,10 @@ impl FilePicker {
             return; // stale (we navigated away) or not ours
         }
         let state = match bytes {
-            Ok(b) => match Texture::decode_scaled(b, THUMB_AREA_W as u32, THUMB_AREA_H as u32) {
-                Ok(t) => ThumbState::Ready(t),
-                Err(_) => ThumbState::Failed,
+            Ok(b) => match crate::imgutil::decode_thumb(b, THUMB_AREA_W as u32, THUMB_AREA_H as u32)
+            {
+                Some(t) => ThumbState::Ready(t),
+                None => ThumbState::Failed,
             },
             Err(_) => ThumbState::Failed,
         };

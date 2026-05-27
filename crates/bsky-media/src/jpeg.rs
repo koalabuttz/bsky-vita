@@ -30,6 +30,27 @@ mod ffi {
             jpegQual: c_int,
             flags: c_int,
         ) -> c_int;
+        pub fn tjInitDecompress() -> tjhandle;
+        pub fn tjDecompressHeader3(
+            handle: tjhandle,
+            jpegBuf: *const c_uchar,
+            jpegSize: c_ulong,
+            width: *mut c_int,
+            height: *mut c_int,
+            jpegSubsamp: *mut c_int,
+            jpegColorspace: *mut c_int,
+        ) -> c_int;
+        pub fn tjDecompress2(
+            handle: tjhandle,
+            jpegBuf: *const c_uchar,
+            jpegSize: c_ulong,
+            dstBuf: *mut c_uchar,
+            width: c_int,
+            pitch: c_int,
+            height: c_int,
+            pixelFormat: c_int,
+            flags: c_int,
+        ) -> c_int;
         pub fn tjFree(buffer: *mut c_uchar);
         pub fn tjDestroy(handle: tjhandle) -> c_int;
     }
@@ -82,4 +103,57 @@ pub fn encode_rgba(rgba: &[u8], w: u32, h: u32, quality: u8) -> Result<Vec<u8>, 
 pub fn encode_rgba(rgba: &[u8], w: u32, h: u32, quality: u8) -> Result<Vec<u8>, String> {
     let _ = (rgba, w, h, quality);
     Err("jpeg encode is only available on Vita".into())
+}
+
+/// Decode a JPEG to a tightly-packed RGBA buffer `(rgba, w, h)`. CPU
+/// (turbojpeg) decode — used for oversized local images so the GPU never
+/// has to decode them (see [`crate::image`]).
+#[cfg(target_os = "vita")]
+pub fn decode_rgba(jpeg: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
+    unsafe {
+        let handle = ffi::tjInitDecompress();
+        if handle.is_null() {
+            return Err("tjInitDecompress failed".into());
+        }
+        let mut w: core::ffi::c_int = 0;
+        let mut h: core::ffi::c_int = 0;
+        let mut subsamp: core::ffi::c_int = 0;
+        let mut colorspace: core::ffi::c_int = 0;
+        let rc = ffi::tjDecompressHeader3(
+            handle,
+            jpeg.as_ptr(),
+            jpeg.len() as core::ffi::c_ulong,
+            &mut w,
+            &mut h,
+            &mut subsamp,
+            &mut colorspace,
+        );
+        if rc != 0 || w <= 0 || h <= 0 {
+            ffi::tjDestroy(handle);
+            return Err(format!("tjDecompressHeader3 failed: rc={rc}"));
+        }
+        let mut out = vec![0u8; (w as usize) * (h as usize) * 4];
+        let rc = ffi::tjDecompress2(
+            handle,
+            jpeg.as_ptr(),
+            jpeg.len() as core::ffi::c_ulong,
+            out.as_mut_ptr(),
+            w,
+            0, // pitch 0 = tightly packed (width * 4 for RGBA)
+            h,
+            ffi::TJPF_RGBA,
+            0,
+        );
+        ffi::tjDestroy(handle);
+        if rc != 0 {
+            return Err(format!("tjDecompress2 failed: rc={rc}"));
+        }
+        Ok((out, w as u32, h as u32))
+    }
+}
+
+#[cfg(not(target_os = "vita"))]
+pub fn decode_rgba(jpeg: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
+    let _ = jpeg;
+    Err("jpeg decode is only available on Vita".into())
 }

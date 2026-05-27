@@ -446,6 +446,12 @@ impl Texture {
         } else {
             3
         };
+        // Decoding a large source (e.g. a multi-MB photo) allocates a
+        // full-resolution GPU texture and frees it here. This runs between
+        // frames (worker-response handling), so the previous frame may
+        // still be in flight — wait for the GPU to go idle first, or the
+        // allocator can reuse memory the GPU is still reading → GPUCRASH.
+        crate::wait_rendering_done();
         let full = Self::from_image_bytes(bytes)?;
         let sw = full.width.max(1) as u32;
         let sh = full.height.max(1) as u32;
@@ -514,6 +520,10 @@ impl Texture {
         } else {
             3
         };
+        // See decode_scaled: the full-res decode below allocates/frees a
+        // large GPU texture between frames — sync the GPU first to avoid an
+        // allocator reuse-vs-in-flight-read race (GPUCRASH).
+        crate::wait_rendering_done();
         let full = Self::from_image_bytes(bytes)?;
         let sw = full.width.max(1) as u32;
         let sh = full.height.max(1) as u32;
