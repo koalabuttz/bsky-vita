@@ -19,6 +19,7 @@ use std::sync::Arc;
 use bsky_auth::AuthClient;
 use bsky_ime::{Ime, ImeMode, ImeState, TextBoxMode};
 use bsky_input::buttons;
+use bsky_media::jpeg;
 use bsky_render::{theme, Font, Frame, Texture, SCREEN_HEIGHT, SCREEN_WIDTH};
 use bsky_worker::{ComposedImage, ReplyTarget, WorkRequest, WorkResponse};
 
@@ -34,6 +35,12 @@ const POST_LIMIT: usize = 300;
 /// Max size of the attached-image preview texture in the compose strip.
 const PREVIEW_W: u32 = 152;
 const PREVIEW_H: u32 = 100;
+
+/// Upload byte cap (bsky.social rejects larger image blobs). Images over
+/// this are downscaled + re-encoded to JPEG before upload.
+const MAX_UPLOAD_BYTES: usize = 1_000_000;
+/// Longest-edge target when downscaling an oversized image.
+const DOWNSCALE_EDGE: u32 = 1600;
 
 /// Height of the close bar in the full-screen image view; the image is
 /// fit + centered in the area below it so the bar never covers it.
@@ -77,9 +84,12 @@ pub struct ComposeScreen {
     /// Decoded preview of the attached image (downscaled). `None` while
     /// loading or if decode failed.
     preview: Option<Texture>,
-    /// Raw bytes of the attached image — kept for the full-screen preview
-    /// and the step-5 upload. `None` when nothing is attached.
+    /// Upload-ready bytes of the attached image (downscaled + re-encoded
+    /// if the source was oversized). Kept for the full-screen preview and
+    /// the upload. `None` when nothing is attached.
     attached_bytes: Option<Vec<u8>>,
+    /// MIME type for `attached_bytes` (image/jpeg or image/png).
+    attached_mime: String,
     /// Full-screen image-preview modal: tapping the thumbnail opens it.
     viewing_full: bool,
     full_tex: Option<Texture>,
@@ -111,6 +121,7 @@ impl ComposeScreen {
             attached_path: None,
             preview: None,
             attached_bytes: None,
+            attached_mime: String::new(),
             viewing_full: false,
             full_tex: None,
             preview_btn: ButtonState::default(),
@@ -163,6 +174,7 @@ impl Screen for ComposeScreen {
                     // handle_worker_response once the picker is closed.
                     self.preview = None;
                     self.attached_bytes = None;
+                    self.attached_mime.clear();
                     self.full_tex = None; // discard prior image's full view
                     if let Some(worker) = ctx.worker {
                         worker.send(WorkRequest::ReadImageFile { path: path.clone() });
@@ -294,20 +306,13 @@ impl Screen for ComposeScreen {
                 // Build the image attachment from the loaded bytes (mime by
                 // extension). can_post() guarantees bytes are present if a
                 // path is attached.
-                let images = match (&self.attached_bytes, &self.attached_path) {
-                    (Some(bytes), Some(path)) => {
-                        let mime = if path.to_ascii_lowercase().ends_with(".png") {
-                            "image/png"
-                        } else {
-                            "image/jpeg"
-                        };
-                        vec![ComposedImage {
-                            bytes: bytes.clone(),
-                            mime: mime.to_string(),
-                            alt: String::new(),
-                        }]
-                    }
-                    _ => Vec::new(),
+                let images = match &self.attached_bytes {
+                    Some(bytes) => vec![ComposedImage {
+                        bytes: bytes.clone(),
+                        mime: self.attached_mime.clone(),
+                        alt: String::new(),
+                    }],
+                    None => Vec::new(),
                 };
                 worker.send(WorkRequest::CreatePost {
                     text: self.text.clone(),
@@ -430,6 +435,7 @@ impl Screen for ComposeScreen {
                 self.attached_path = None;
                 self.preview = None;
                 self.attached_bytes = None;
+                self.attached_mime.clear();
                 self.full_tex = None; // safe: not in full-view this frame
             } else {
                 let px = 176;
@@ -529,8 +535,12 @@ impl Screen for ComposeScreen {
             } else if self.attached_path.as_deref() == Some(url.as_str()) {
                 // Bytes for the attached image → build the compose preview.
                 if let Ok(b) = bytes {
-                    self.preview = Texture::decode_scaled(b, PREVIEW_W, PREVIEW_H).ok();
-                    self.attached_bytes = Some(b.clone());
+                    // Downscale + re-encode if oversized, so the upload
+                    // stays under the blob cap.
+                    let (upload_bytes, mime) = fit_for_upload(b, url);
+                    self.preview = Texture::decode_scaled(&upload_bytes, PREVIEW_W, PREVIEW_H).ok();
+                    self.attached_bytes = Some(upload_bytes);
+                    self.attached_mime = mime;
                 }
             }
             return;
@@ -556,6 +566,38 @@ impl Screen for ComposeScreen {
             }
         }
     }
+}
+
+/// MIME type from a file path's extension (defaults to JPEG).
+fn mime_from_path(path: &str) -> String {
+    if path.to_ascii_lowercase().ends_with(".png") {
+        "image/png"
+    } else {
+        "image/jpeg"
+    }
+    .to_string()
+}
+
+/// Produce upload-ready bytes + MIME for an attached image. In-spec
+/// images upload as-is; oversized ones are decoded, downscaled to
+/// `DOWNSCALE_EDGE`, and re-encoded to JPEG (lowering quality if still
+/// over the cap). On any decode/encode failure, falls back to the raw
+/// bytes (the server will reject if truly too large).
+fn fit_for_upload(raw: &[u8], path: &str) -> (Vec<u8>, String) {
+    if raw.len() <= MAX_UPLOAD_BYTES {
+        return (raw.to_vec(), mime_from_path(path));
+    }
+    let Ok((rgba, w, h)) = Texture::decode_scaled_rgba(raw, DOWNSCALE_EDGE, DOWNSCALE_EDGE) else {
+        return (raw.to_vec(), mime_from_path(path));
+    };
+    for quality in [85u8, 70, 55] {
+        if let Ok(jpeg) = jpeg::encode_rgba(&rgba, w, h, quality) {
+            if jpeg.len() <= MAX_UPLOAD_BYTES || quality == 55 {
+                return (jpeg, "image/jpeg".to_string());
+            }
+        }
+    }
+    (raw.to_vec(), mime_from_path(path))
 }
 
 /// Invisible-but-tappable region. Doesn't render any visuals (the

@@ -486,6 +486,64 @@ impl Texture {
         Err(RenderError::NotOnVita)
     }
 
+    /// Like [`decode_scaled`] but returns a tightly-packed RGBA byte
+    /// buffer `(rgba, w, h)` instead of a texture — for re-encoding an
+    /// oversized image to JPEG (`bsky_media::jpeg::encode_rgba`) before
+    /// upload. No GPU texture is created.
+    #[cfg(target_os = "vita")]
+    pub fn decode_scaled_rgba(
+        bytes: &[u8],
+        max_w: u32,
+        max_h: u32,
+    ) -> Result<(Vec<u8>, u32, u32), RenderError> {
+        let src_bpp: usize = if bytes.len() >= 8 && &bytes[..8] == b"\x89PNG\r\n\x1a\n" {
+            4
+        } else {
+            3
+        };
+        let full = Self::from_image_bytes(bytes)?;
+        let sw = full.width.max(1) as u32;
+        let sh = full.height.max(1) as u32;
+        let scale = (max_w as f32 / sw as f32)
+            .min(max_h as f32 / sh as f32)
+            .min(1.0);
+        let tw = ((sw as f32 * scale).round() as u32).max(1);
+        let th = ((sh as f32 * scale).round() as u32).max(1);
+        let mut out = vec![0u8; (tw as usize) * (th as usize) * 4];
+
+        unsafe {
+            let src_stride = ffi::vita2d_texture_get_stride(full.ptr.as_ptr()) as usize;
+            let src_base = ffi::vita2d_texture_get_datap(full.ptr.as_ptr()) as *const u8;
+            if src_base.is_null() || src_stride == 0 {
+                return Err(RenderError::TextureLoad("decode_scaled_rgba: null source"));
+            }
+            for dy in 0..th as usize {
+                let sy = (dy as u32 * sh / th) as usize;
+                let src_row = src_base.add(sy * src_stride);
+                for dx in 0..tw as usize {
+                    let sx = (dx as u32 * sw / tw) as usize;
+                    let s = src_row.add(sx * src_bpp);
+                    let d = (dy * tw as usize + dx) * 4;
+                    out[d] = *s;
+                    out[d + 1] = *s.add(1);
+                    out[d + 2] = *s.add(2);
+                    out[d + 3] = if src_bpp == 4 { *s.add(3) } else { 0xFF };
+                }
+            }
+        }
+        Ok((out, tw, th))
+    }
+
+    #[cfg(not(target_os = "vita"))]
+    pub fn decode_scaled_rgba(
+        bytes: &[u8],
+        max_w: u32,
+        max_h: u32,
+    ) -> Result<(Vec<u8>, u32, u32), RenderError> {
+        let _ = (bytes, max_w, max_h);
+        Err(RenderError::NotOnVita)
+    }
+
     pub fn width(&self) -> i32 {
         self.width
     }

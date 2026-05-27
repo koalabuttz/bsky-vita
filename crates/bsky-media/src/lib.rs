@@ -9,3 +9,4 @@
 //! Phase 7 build order: `fs` first (this commit), then `camera` + `jpeg`.
 
 pub mod fs;
+pub mod jpeg;
