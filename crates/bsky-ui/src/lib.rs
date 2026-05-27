@@ -1,5 +1,6 @@
 //! Immediate-mode UI for bsky-vita.
 
+pub mod camera;
 pub mod cdn;
 pub mod compose;
 pub mod embeds;

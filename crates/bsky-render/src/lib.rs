@@ -87,6 +87,19 @@ use std::ffi::CString;
 pub const SCREEN_WIDTH: i32 = 960;
 pub const SCREEN_HEIGHT: i32 = 544;
 
+/// Block until the GPU has finished all submitted rendering. Call before
+/// freeing a texture that may have been drawn in a just-submitted frame,
+/// to avoid a GPU use-after-free (the GPU reading freed memory).
+#[cfg(target_os = "vita")]
+pub fn wait_rendering_done() {
+    unsafe {
+        ffi::vita2d_wait_rendering_done();
+    }
+}
+
+#[cfg(not(target_os = "vita"))]
+pub fn wait_rendering_done() {}
+
 
 /// 32-bit RGBA color matching vita2d's `RGBA8` macro layout: alpha in the
 /// MSB, then blue, then green, then red in the LSB. Construct via
@@ -542,6 +555,57 @@ impl Texture {
     ) -> Result<(Vec<u8>, u32, u32), RenderError> {
         let _ = (bytes, max_w, max_h);
         Err(RenderError::NotOnVita)
+    }
+
+    /// Create an empty `w × h` RGBA8 (`A8B8G8R8`) texture for streaming
+    /// updates (e.g. live camera frames via [`upload_rgba`]).
+    #[cfg(target_os = "vita")]
+    pub fn new_rgba(w: u32, h: u32) -> Result<Self, RenderError> {
+        let p = unsafe {
+            ffi::vita2d_create_empty_texture_format(
+                w,
+                h,
+                vitasdk_sys::SCE_GXM_TEXTURE_FORMAT_A8B8G8R8 as core::ffi::c_uint,
+            )
+        };
+        Self::wrap_raw(p, "RGBA empty")
+    }
+
+    #[cfg(not(target_os = "vita"))]
+    pub fn new_rgba(w: u32, h: u32) -> Result<Self, RenderError> {
+        let _ = (w, h);
+        Err(RenderError::NotOnVita)
+    }
+
+    /// Copy a tightly-packed `width × height × 4` RGBA buffer into this
+    /// texture (respecting its stride). For per-frame camera upload.
+    #[cfg(target_os = "vita")]
+    pub fn upload_rgba(&self, rgba: &[u8]) {
+        unsafe {
+            let stride = ffi::vita2d_texture_get_stride(self.ptr.as_ptr()) as usize;
+            let base = ffi::vita2d_texture_get_datap(self.ptr.as_ptr()) as *mut u8;
+            if base.is_null() || stride == 0 {
+                return;
+            }
+            let w = self.width as usize;
+            let h = self.height as usize;
+            let row = w * 4;
+            if rgba.len() < row * h {
+                return;
+            }
+            for y in 0..h {
+                core::ptr::copy_nonoverlapping(
+                    rgba.as_ptr().add(y * row),
+                    base.add(y * stride),
+                    row,
+                );
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "vita"))]
+    pub fn upload_rgba(&self, rgba: &[u8]) {
+        let _ = rgba;
     }
 
     pub fn width(&self) -> i32 {

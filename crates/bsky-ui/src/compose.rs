@@ -23,6 +23,7 @@ use bsky_media::jpeg;
 use bsky_render::{theme, Font, Frame, Texture, SCREEN_HEIGHT, SCREEN_WIDTH};
 use bsky_worker::{ComposedImage, ReplyTarget, WorkRequest, WorkResponse};
 
+use crate::camera::{CameraCapture, CameraResult};
 use crate::file_picker::{FilePicker, PickResult};
 use crate::screen::{Screen, ScreenAction};
 use crate::widget::{button, ButtonState, Rect, UiCtx};
@@ -76,8 +77,16 @@ pub struct ComposeScreen {
     text_area_btn: ButtonState,
     add_image_btn: ButtonState,
     remove_img_btn: ButtonState,
+    camera_btn: ButtonState,
     /// Modal file picker; `Some` while the user is choosing an image.
     picker: Option<FilePicker>,
+    /// Modal camera capture; `Some` while shooting a photo.
+    camera: Option<CameraCapture>,
+    /// Set when the camera modal finishes; the `CameraCapture` (and its
+    /// textures) is dropped at the top of the NEXT frame after a
+    /// `wait_rendering_done`, so its frame textures aren't freed in the
+    /// frame they were drawn (GPU use-after-free).
+    pending_camera_close: bool,
     /// Path of the chosen image (the upload source; step 5 reads + uploads
     /// these bytes).
     attached_path: Option<String>,
@@ -117,7 +126,10 @@ impl ComposeScreen {
             text_area_btn: ButtonState::default(),
             add_image_btn: ButtonState::default(),
             remove_img_btn: ButtonState::default(),
+            camera_btn: ButtonState::default(),
             picker: None,
+            camera: None,
+            pending_camera_close: false,
             attached_path: None,
             preview: None,
             attached_bytes: None,
@@ -165,6 +177,16 @@ impl Screen for ComposeScreen {
             return ScreenAction::Pop;
         }
 
+        // ─── 0a2. Deferred camera close: the result frame already drew
+        //         the camera textures; wait for the GPU to consume that
+        //         frame, then drop (free) them now that nothing references
+        //         them. ────────────────────────────────────────────────
+        if self.pending_camera_close {
+            bsky_render::wait_rendering_done();
+            self.camera = None;
+            self.pending_camera_close = false;
+        }
+
         // ─── 0b. Modal file picker takes over the whole frame. ─────────
         if self.picker.is_some() {
             match self.picker.as_mut().unwrap().render(frame, font, ctx) {
@@ -183,6 +205,24 @@ impl Screen for ComposeScreen {
                     self.picker = None;
                 }
                 Some(PickResult::Cancelled) => self.picker = None,
+                None => {}
+            }
+            return ScreenAction::None;
+        }
+
+        // ─── 0b2. Modal camera capture. ────────────────────────────────
+        if self.camera.is_some() {
+            match self.camera.as_mut().unwrap().render(frame, font, ctx) {
+                Some(CameraResult::Confirmed(jpeg)) => {
+                    // Camera JPEG is already small + in-spec; no fit needed.
+                    self.preview = Texture::decode_scaled(&jpeg, PREVIEW_W, PREVIEW_H).ok();
+                    self.attached_path = Some("camera.jpg".to_string());
+                    self.attached_mime = "image/jpeg".to_string();
+                    self.attached_bytes = Some(jpeg);
+                    self.full_tex = None;
+                    self.pending_camera_close = true;
+                }
+                Some(CameraResult::Cancelled) => self.pending_camera_close = true,
                 None => {}
             }
             return ScreenAction::None;
@@ -404,16 +444,35 @@ impl Screen for ComposeScreen {
 
         // ─── 5b. Attachment area: Add/Change + preview + Remove. ───────
         let attach_y = content_top + area_h + 8;
-        let add_label = if self.attached_path.is_some() {
-            "Change image"
-        } else {
-            "Add image"
-        };
-        if button(
+        if self.attached_path.is_none() {
+            // Two source choices: file browser or camera.
+            if button(
+                frame,
+                font,
+                Rect::new(12.0, attach_y as f32, 132.0, 40.0),
+                "Choose file",
+                &mut self.add_image_btn,
+                ctx,
+                interactive,
+            ) {
+                self.picker = Some(FilePicker::new());
+            }
+            if button(
+                frame,
+                font,
+                Rect::new(152.0, attach_y as f32, 110.0, 40.0),
+                "Camera",
+                &mut self.camera_btn,
+                ctx,
+                interactive,
+            ) {
+                self.camera = Some(CameraCapture::new());
+            }
+        } else if button(
             frame,
             font,
             Rect::new(12.0, attach_y as f32, 150.0, 40.0),
-            add_label,
+            "Change image",
             &mut self.add_image_btn,
             ctx,
             interactive,
