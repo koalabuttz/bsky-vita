@@ -21,10 +21,11 @@ use bsky_ime::{Ime, ImeMode, ImeState, TextBoxMode};
 use bsky_input::buttons;
 use bsky_media::jpeg;
 use bsky_render::{theme, Font, Frame, Texture, SCREEN_HEIGHT, SCREEN_WIDTH};
-use bsky_worker::{ComposedImage, ReplyTarget, WorkRequest, WorkResponse};
+use bsky_worker::{ComposedImage, ReplyTarget, ThreadSegment, WorkRequest, WorkResponse};
 
 use crate::camera::{CameraCapture, CameraResult};
 use crate::file_picker::{FilePicker, PickResult};
+use crate::imgutil::decode_thumb;
 use crate::screen::{Screen, ScreenAction};
 use crate::widget::{button, ButtonState, Rect, UiCtx};
 
@@ -64,6 +65,27 @@ impl Attachment {
     }
 }
 
+/// One post within the thread being composed.
+#[derive(Default)]
+struct Segment {
+    text: String,
+    attachments: Vec<Attachment>,
+}
+
+impl Segment {
+    /// A segment is postable if it has text or at least one (loaded)
+    /// image and is within the length cap.
+    fn valid(&self) -> bool {
+        let n = self.text.chars().count();
+        n <= POST_LIMIT
+            && (n > 0 || !self.attachments.is_empty())
+            && self.attachments.iter().all(|a| a.loaded())
+    }
+}
+
+/// Bluesky's max posts in a thread.
+const MAX_SEGMENTS: usize = 25;
+
 /// Upload byte cap (bsky.social rejects larger image blobs). Images over
 /// this are downscaled + re-encoded to JPEG before upload.
 const MAX_UPLOAD_BYTES: usize = 1_000_000;
@@ -73,6 +95,10 @@ const DOWNSCALE_EDGE: u32 = 1600;
 /// Height of the close bar in the full-screen image view; the image is
 /// fit + centered in the area below it so the bar never covers it.
 const FULLVIEW_BAR_H: i32 = 30;
+/// Height of the alt-text band at the bottom of the full-screen image
+/// view. The image is decoded + centered to fit strictly between the top
+/// bar and this band, so it never overlaps either.
+const FULLVIEW_ALT_H: i32 = 56;
 
 #[derive(Default)]
 enum ComposeState {
@@ -96,14 +122,20 @@ pub struct ComposeScreen {
     /// "Replying to @handle" header line). Always `Some` when `reply_to`
     /// is `Some`.
     reply_handle: Option<String>,
-    /// Current text buffer.
-    text: String,
+    /// Thread segments (≥1) — each is one post. `current` is the segment
+    /// being edited.
+    segments: Vec<Segment>,
+    current: usize,
     state: ComposeState,
     cancel_btn: ButtonState,
     post_btn: ButtonState,
     text_area_btn: ButtonState,
     add_image_btn: ButtonState,
     camera_btn: ButtonState,
+    prev_seg_btn: ButtonState,
+    next_seg_btn: ButtonState,
+    add_seg_btn: ButtonState,
+    remove_seg_btn: ButtonState,
     /// Modal file picker; `Some` while the user is choosing an image.
     picker: Option<FilePicker>,
     /// Modal camera capture; `Some` while shooting a photo.
@@ -113,11 +145,15 @@ pub struct ComposeScreen {
     /// `wait_rendering_done`, so its frame textures aren't freed in the
     /// frame they were drawn (GPU use-after-free).
     pending_camera_close: bool,
-    /// Attached images (≤ `MAX_IMAGES`), in order.
-    attachments: Vec<Attachment>,
-    /// Index queued for removal next frame (deferred so its thumbnail
-    /// texture isn't freed in the frame it was drawn — GPU use-after-free).
+    /// Attachment index queued for removal from the current segment next
+    /// frame (deferred so its thumbnail texture isn't freed in the frame
+    /// it was drawn — GPU use-after-free).
     pending_remove: Option<usize>,
+    /// Set when the file picker finishes; the `FilePicker` (and its
+    /// thumbnail textures) is dropped at the top of the NEXT frame after a
+    /// `wait_rendering_done`, so those textures aren't freed in the frame
+    /// the picker just drew them (GPU use-after-free → GPUCRASH).
+    pending_picker_close: bool,
     /// Per-strip-cell tap state (thumbnail body / remove).
     thumb_btns: [ButtonState; MAX_IMAGES],
     remove_btns: [ButtonState; MAX_IMAGES],
@@ -144,18 +180,23 @@ impl ComposeScreen {
             client,
             reply_to,
             reply_handle,
-            text: String::new(),
+            segments: vec![Segment::default()],
+            current: 0,
             state: ComposeState::default(),
             cancel_btn: ButtonState::default(),
             post_btn: ButtonState::default(),
             text_area_btn: ButtonState::default(),
             add_image_btn: ButtonState::default(),
             camera_btn: ButtonState::default(),
+            prev_seg_btn: ButtonState::default(),
+            next_seg_btn: ButtonState::default(),
+            add_seg_btn: ButtonState::default(),
+            remove_seg_btn: ButtonState::default(),
             picker: None,
             camera: None,
             pending_camera_close: false,
-            attachments: Vec::new(),
             pending_remove: None,
+            pending_picker_close: false,
             thumb_btns: Default::default(),
             remove_btns: Default::default(),
             viewing: None,
@@ -167,39 +208,62 @@ impl ComposeScreen {
         }
     }
 
+    /// Char count of the segment currently being edited.
     fn char_count(&self) -> usize {
-        self.text.chars().count()
+        self.segments[self.current].text.chars().count()
     }
 
     fn can_post(&self) -> bool {
-        let n = self.char_count();
-        if n > POST_LIMIT
-            || !matches!(self.state, ComposeState::Editing | ComposeState::Error(_))
-        {
+        if !matches!(self.state, ComposeState::Editing | ComposeState::Error(_)) {
             return false;
         }
-        // Hold Post until every attachment's bytes have loaded.
-        if self.attachments.iter().any(|a| !a.loaded()) {
-            return false;
+        // Every segment must be a valid, fully-loaded post.
+        self.segments.iter().all(|s| s.valid())
+    }
+
+    /// Switch the segment being edited. No texture frees (the other
+    /// segments keep their thumbnails); `full_tex` isn't drawn outside the
+    /// modal so dropping it here is safe.
+    fn switch_segment(&mut self, to: usize) {
+        self.viewing = None;
+        self.full_tex = None;
+        self.current = to.min(self.segments.len().saturating_sub(1));
+    }
+
+    /// Remove the current segment (frees its thumbnail textures). Safe to
+    /// free here: this runs in the thread bar, BEFORE the strip draws this
+    /// frame, so the only in-flight references are last frame's — flushed
+    /// by `wait_rendering_done`.
+    fn remove_current_segment(&mut self) {
+        if self.segments.len() <= 1 {
+            return;
         }
-        // Post needs text OR at least one image.
-        n > 0 || !self.attachments.is_empty()
+        bsky_render::wait_rendering_done();
+        self.viewing = None;
+        self.full_tex = None;
+        self.segments.remove(self.current);
+        if self.current >= self.segments.len() {
+            self.current = self.segments.len() - 1;
+        }
     }
 
     /// Decode the screen-fit texture for the currently-`viewing`
-    /// attachment (reused while open).
+    /// attachment of the current segment (reused while open).
     fn ensure_full_tex(&mut self) {
         if self.full_tex.is_some() {
             return;
         }
+        let cur = self.current;
         if let Some(i) = self.viewing {
-            if let Some(bytes) = self.attachments.get(i).and_then(|a| a.bytes.as_ref()) {
-                self.full_tex = Texture::decode_scaled(
+            if let Some(bytes) =
+                self.segments[cur].attachments.get(i).and_then(|a| a.bytes.as_ref())
+            {
+                // CPU decode → small texture (never GPU-decode a local file).
+                self.full_tex = decode_thumb(
                     bytes,
                     SCREEN_WIDTH as u32,
-                    (SCREEN_HEIGHT - FULLVIEW_BAR_H) as u32,
-                )
-                .ok();
+                    (SCREEN_HEIGHT - FULLVIEW_BAR_H - FULLVIEW_ALT_H) as u32,
+                );
             }
         }
     }
@@ -229,13 +293,24 @@ impl Screen for ComposeScreen {
             self.pending_camera_close = false;
         }
 
+        // ─── 0a2b. Deferred picker close: the picker just drew its
+        //          thumbnail textures in the frame it returned a result;
+        //          wait for the GPU to consume that frame before dropping
+        //          (freeing) them. ─────────────────────────────────────
+        if self.pending_picker_close {
+            bsky_render::wait_rendering_done();
+            self.picker = None;
+            self.pending_picker_close = false;
+        }
+
         // ─── 0a3. Deferred attachment removal: its thumbnail was drawn
         //         last frame, so free it now (after the GPU consumed that
         //         frame), not in the frame the Remove button was tapped. ──
         if let Some(i) = self.pending_remove.take() {
             bsky_render::wait_rendering_done();
-            if i < self.attachments.len() {
-                self.attachments.remove(i);
+            let cur = self.current;
+            if i < self.segments[cur].attachments.len() {
+                self.segments[cur].attachments.remove(i);
             }
         }
 
@@ -245,12 +320,15 @@ impl Screen for ComposeScreen {
         match ime.poll() {
             ImeState::Finished(s) => {
                 if self.editing_alt {
-                    if let Some(a) = self.viewing.and_then(|i| self.attachments.get_mut(i)) {
+                    let cur = self.current;
+                    if let Some(a) =
+                        self.viewing.and_then(|i| self.segments[cur].attachments.get_mut(i))
+                    {
                         a.alt = s;
                     }
                     self.editing_alt = false;
                 } else {
-                    self.text = s;
+                    self.segments[self.current].text = s;
                 }
                 ime.close();
             }
@@ -267,11 +345,12 @@ impl Screen for ComposeScreen {
                 Some(PickResult::Picked(path)) => {
                     // Append a loading attachment + request its bytes
                     // (matched back by `key` in handle_worker_response).
-                    if self.attachments.len() < MAX_IMAGES {
+                    let cur = self.current;
+                    if self.segments[cur].attachments.len() < MAX_IMAGES {
                         if let Some(worker) = ctx.worker {
                             worker.send(WorkRequest::ReadImageFile { path: path.clone() });
                         }
-                        self.attachments.push(Attachment {
+                        self.segments[cur].attachments.push(Attachment {
                             key: path,
                             bytes: None,
                             mime: String::new(),
@@ -279,9 +358,13 @@ impl Screen for ComposeScreen {
                             preview: None,
                         });
                     }
-                    self.picker = None;
+                    // Defer the drop: the picker drew its thumbnail
+                    // textures this frame, so freeing them now would be a
+                    // GPU use-after-free (GPUCRASH). Dropped next frame
+                    // after wait_rendering_done (block 0a2b).
+                    self.pending_picker_close = true;
                 }
-                Some(PickResult::Cancelled) => self.picker = None,
+                Some(PickResult::Cancelled) => self.pending_picker_close = true,
                 None => {}
             }
             return ScreenAction::None;
@@ -292,10 +375,10 @@ impl Screen for ComposeScreen {
             match self.camera.as_mut().unwrap().render(frame, font, ctx) {
                 Some(CameraResult::Confirmed(jpeg)) => {
                     // Camera JPEG is already small + in-spec; no fit needed.
-                    if self.attachments.len() < MAX_IMAGES {
-                        let preview =
-                            Texture::decode_scaled(&jpeg, STRIP_THUMB_W, STRIP_THUMB_H).ok();
-                        self.attachments.push(Attachment {
+                    let cur = self.current;
+                    if self.segments[cur].attachments.len() < MAX_IMAGES {
+                        let preview = decode_thumb(&jpeg, STRIP_THUMB_W, STRIP_THUMB_H);
+                        self.segments[cur].attachments.push(Attachment {
                             key: "camera.jpg".to_string(),
                             bytes: Some(jpeg),
                             mime: "image/jpeg".to_string(),
@@ -314,7 +397,7 @@ impl Screen for ComposeScreen {
         // ─── 0c. Full-screen attachment preview + alt-text editing. ────
         if let Some(vi) = self.viewing {
             self.ensure_full_tex();
-            let band_h = 56;
+            let band_h = FULLVIEW_ALT_H;
             let band_y = SCREEN_HEIGHT - band_h;
             frame.fill_rect(
                 0.0,
@@ -334,7 +417,11 @@ impl Screen for ComposeScreen {
             frame.fill_rect(0.0, 0.0, SCREEN_WIDTH as f32, FULLVIEW_BAR_H as f32, theme::FIELD_BG);
             frame.draw_text(font, 12, 21, theme::TEXT_PRIMARY, 0.9, "O / X  close");
             // Alt-text band + Edit button.
-            let alt = self.attachments.get(vi).map(|a| a.alt.clone()).unwrap_or_default();
+            let alt = self.segments[self.current]
+                .attachments
+                .get(vi)
+                .map(|a| a.alt.clone())
+                .unwrap_or_default();
             frame.fill_rect(0.0, band_y as f32, SCREEN_WIDTH as f32, band_h as f32, theme::FIELD_BG);
             let (alt_text, alt_color): (&str, _) = if alt.is_empty() {
                 ("No alt text", theme::TEXT_MUTED)
@@ -431,36 +518,43 @@ impl Screen for ComposeScreen {
         };
         frame.draw_text_centered(font, 36, theme::TEXT_PRIMARY, 1.1, title);
 
-        // Post (right).
+        // Post (right). "Post all" when it's a multi-segment thread.
         let post_rect = Rect::new(SCREEN_WIDTH as f32 - 108.0, 8.0, 100.0, 40.0);
         let can_post = self.can_post();
+        let post_label = if self.segments.len() > 1 { "Post all" } else { "Post" };
         let post_clicked = button(
             frame,
             font,
             post_rect,
-            "Post",
+            post_label,
             &mut self.post_btn,
             ctx,
             can_post,
         );
         if post_clicked {
             if let Some(worker) = ctx.worker {
-                // All attachments are loaded (can_post guarantees it).
-                let images: Vec<ComposedImage> = self
-                    .attachments
+                // can_post guarantees every segment is valid + loaded.
+                let segments: Vec<ThreadSegment> = self
+                    .segments
                     .iter()
-                    .filter_map(|a| {
-                        a.bytes.as_ref().map(|b| ComposedImage {
-                            bytes: b.clone(),
-                            mime: a.mime.clone(),
-                            alt: a.alt.clone(),
-                        })
+                    .map(|seg| ThreadSegment {
+                        text: seg.text.clone(),
+                        images: seg
+                            .attachments
+                            .iter()
+                            .filter_map(|a| {
+                                a.bytes.as_ref().map(|b| ComposedImage {
+                                    bytes: b.clone(),
+                                    mime: a.mime.clone(),
+                                    alt: a.alt.clone(),
+                                })
+                            })
+                            .collect(),
                     })
                     .collect();
-                worker.send(WorkRequest::CreatePost {
-                    text: self.text.clone(),
+                worker.send(WorkRequest::CreateThread {
+                    segments,
                     reply_to: self.reply_to.clone(),
-                    images,
                 });
                 self.state = ComposeState::Submitting;
             }
@@ -481,13 +575,57 @@ impl Screen for ComposeScreen {
             content_top += 28;
         }
 
+        // ─── 4b. Thread bar: "Post N/M", segment nav, add/remove post. ─
+        {
+            let by = content_top;
+            let nlen = self.segments.len();
+            if nlen == 1 {
+                // Not a thread yet — a single "+ Thread" entry; the nav /
+                // add / delete controls stay hidden until threading starts.
+                if button(frame, font, Rect::new(16.0, by as f32, 134.0, 32.0), "+ Thread", &mut self.add_seg_btn, ctx, interactive) {
+                    self.segments.push(Segment::default());
+                    self.switch_segment(1);
+                }
+            } else {
+                // D-pad LEFT/RIGHT navigates segments too.
+                if interactive {
+                    if ctx.pad.just_pressed(buttons::LEFT) && self.current > 0 {
+                        self.switch_segment(self.current - 1);
+                    }
+                    if ctx.pad.just_pressed(buttons::RIGHT) && self.current + 1 < nlen {
+                        self.switch_segment(self.current + 1);
+                    }
+                }
+                let label = format!("Post {} / {}", self.current + 1, nlen);
+                frame.draw_text(font, 16, by + 23, theme::TEXT_PRIMARY, 0.9, &label);
+                if button(frame, font, Rect::new(150.0, by as f32, 42.0, 32.0), "<", &mut self.prev_seg_btn, ctx, interactive && self.current > 0) {
+                    self.switch_segment(self.current - 1);
+                }
+                if button(frame, font, Rect::new(198.0, by as f32, 42.0, 32.0), ">", &mut self.next_seg_btn, ctx, interactive && self.current + 1 < nlen) {
+                    self.switch_segment(self.current + 1);
+                }
+                if button(frame, font, Rect::new(SCREEN_WIDTH as f32 - 232.0, by as f32, 112.0, 32.0), "+ Post", &mut self.add_seg_btn, ctx, interactive && nlen < MAX_SEGMENTS) {
+                    self.segments.push(Segment::default());
+                    self.switch_segment(self.segments.len() - 1);
+                }
+                if button(frame, font, Rect::new(SCREEN_WIDTH as f32 - 112.0, by as f32, 104.0, 32.0), "Del Post", &mut self.remove_seg_btn, ctx, interactive && nlen > 1) {
+                    self.remove_current_segment();
+                }
+            }
+            content_top += 40;
+        }
+
+        // The segment being edited (read after the thread bar may have
+        // switched it).
+        let cur = self.current;
+
         // ─── 5. Text area (tappable). ──────────────────────────────────
         // Reserve a strip below the text area for the image attachment
         // controls (Phase 7).
         let counter_h = 32;
         // Strip is a thumbnail row when images are attached; a single
         // Add/Camera button row otherwise (no dead space).
-        let attach_h = if self.attachments.is_empty() { 44 } else { 94 };
+        let attach_h = if self.segments[cur].attachments.is_empty() { 44 } else { 94 };
         let area_h = SCREEN_HEIGHT - content_top - counter_h - 12 - attach_h - 8;
         let area_rect = Rect::new(
             12.0,
@@ -504,16 +642,17 @@ impl Screen for ComposeScreen {
             theme::FIELD_BG,
         );
         // Text content (or placeholder).
-        let body = if self.text.is_empty() {
+        let empty = self.segments[cur].text.is_empty();
+        let body = if empty {
             if self.reply_to.is_some() {
                 "Tap to write your reply…"
             } else {
                 "Tap to write your post…"
             }
         } else {
-            self.text.as_str()
+            self.segments[cur].text.as_str()
         };
-        let body_color = if self.text.is_empty() {
+        let body_color = if empty {
             theme::TEXT_MUTED
         } else {
             theme::TEXT_PRIMARY
@@ -541,7 +680,7 @@ impl Screen for ComposeScreen {
                 ImeMode::Default,
                 TextBoxMode::Default,
                 POST_LIMIT as u32,
-                &self.text,
+                &self.segments[cur].text,
             );
         }
 
@@ -551,17 +690,18 @@ impl Screen for ComposeScreen {
         let th = STRIP_THUMB_H as i32;
         let mut open_view: Option<usize> = None;
         let mut request_remove: Option<usize> = None;
-        for i in 0..self.attachments.len() {
+        let n_att = self.segments[cur].attachments.len();
+        for i in 0..n_att {
             let cell_x = 12 + (i as i32) * STRIP_PITCH;
             // Thumbnail (or a loading placeholder).
-            if let Some(tex) = self.attachments[i].preview.as_ref() {
+            if let Some(tex) = self.segments[cur].attachments[i].preview.as_ref() {
                 frame.draw_texture(tex, cell_x as f32, attach_y as f32);
             } else {
                 frame.fill_rect(cell_x as f32, attach_y as f32, tw as f32, th as f32, theme::FIELD_BG);
                 frame.draw_text(font, cell_x + 8, attach_y + th / 2, theme::TEXT_MUTED, 0.8, "…");
             }
             // ALT badge.
-            if !self.attachments[i].alt.is_empty() {
+            if !self.segments[cur].attachments[i].alt.is_empty() {
                 frame.fill_rect(cell_x as f32, (attach_y + th - 18) as f32, 36.0, 18.0, theme::ACCENT);
                 frame.draw_text(font, cell_x + 5, attach_y + th - 4, theme::TEXT_PRIMARY, 0.62, "ALT");
             }
@@ -572,16 +712,16 @@ impl Screen for ComposeScreen {
             }
             // Tap the thumbnail body (below the remove corner) → full view.
             let body_rect = Rect::new(cell_x as f32, (attach_y + 26) as f32, tw as f32, (th - 26) as f32);
-            if self.attachments[i].preview.is_some()
+            if self.segments[cur].attachments[i].preview.is_some()
                 && button_invisible(frame, body_rect, &mut self.thumb_btns[i], ctx, interactive)
             {
                 open_view = Some(i);
             }
         }
         // Add / Camera while under the cap.
-        if self.attachments.len() < MAX_IMAGES {
-            let bx = 12 + (self.attachments.len() as i32) * STRIP_PITCH;
-            let by = if self.attachments.is_empty() { attach_y } else { attach_y + 19 };
+        if n_att < MAX_IMAGES {
+            let bx = 12 + (n_att as i32) * STRIP_PITCH;
+            let by = if n_att == 0 { attach_y } else { attach_y + 19 };
             if button(frame, font, Rect::new(bx as f32, by as f32, 72.0, 40.0), "Add", &mut self.add_image_btn, ctx, interactive) {
                 self.picker = Some(FilePicker::new());
             }
@@ -651,14 +791,16 @@ impl Screen for ComposeScreen {
             // Bytes for a loading attachment (matched by key) → fit +
             // decode its strip thumbnail.
             if let Ok(b) = bytes {
+                // Match across ALL segments — the user may switch segments
+                // while an image is still loading.
                 if let Some(att) = self
-                    .attachments
+                    .segments
                     .iter_mut()
+                    .flat_map(|s| s.attachments.iter_mut())
                     .find(|a| !a.loaded() && a.key == *url)
                 {
                     let (upload_bytes, mime) = fit_for_upload(b, url);
-                    att.preview =
-                        Texture::decode_scaled(&upload_bytes, STRIP_THUMB_W, STRIP_THUMB_H).ok();
+                    att.preview = decode_thumb(&upload_bytes, STRIP_THUMB_W, STRIP_THUMB_H);
                     att.bytes = Some(upload_bytes);
                     att.mime = mime;
                 }
@@ -677,7 +819,8 @@ impl Screen for ComposeScreen {
                     // a `done: bool` and returning Pop at the start of
                     // the next frame.
                     self.state = ComposeState::Editing;
-                    self.text.clear();
+                    self.segments = vec![Segment::default()];
+                    self.current = 0;
                     self.done = true;
                 }
                 Err(msg) => {
@@ -707,9 +850,13 @@ fn fit_for_upload(raw: &[u8], path: &str) -> (Vec<u8>, String) {
     if raw.len() <= MAX_UPLOAD_BYTES {
         return (raw.to_vec(), mime_from_path(path));
     }
-    let Ok((rgba, w, h)) = Texture::decode_scaled_rgba(raw, DOWNSCALE_EDGE, DOWNSCALE_EDGE) else {
+    // Decode + downscale on the CPU — GPU-decoding a multi-MB image
+    // crashes vita2d (see bsky_media::image).
+    let Ok((rgba, w, h)) = bsky_media::image::decode_rgba(raw) else {
         return (raw.to_vec(), mime_from_path(path));
     };
+    let (rgba, w, h) =
+        bsky_media::image::downscale_rgba(rgba, w, h, DOWNSCALE_EDGE, DOWNSCALE_EDGE);
     for quality in [85u8, 70, 55] {
         if let Ok(jpeg) = jpeg::encode_rgba(&rgba, w, h, quality) {
             if jpeg.len() <= MAX_UPLOAD_BYTES || quality == 55 {

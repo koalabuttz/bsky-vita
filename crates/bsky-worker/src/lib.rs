@@ -54,7 +54,7 @@ use atrium_api::app::bsky::feed::get_post_thread::OutputThreadRefs;
 use atrium_api::app::bsky::graph::defs::{ListView, StarterPackViewBasic};
 use atrium_api::app::bsky::graph::{get_actor_starter_packs, get_lists};
 use atrium_api::app::bsky::feed::like::RecordData as LikeRecordData;
-use atrium_api::app::bsky::feed::post::{RecordData as PostRecordData, ReplyRefData};
+use atrium_api::app::bsky::feed::post::{RecordData as PostRecordData, ReplyRef, ReplyRefData};
 use atrium_api::app::bsky::feed::repost::RecordData as RepostRecordData;
 use atrium_api::app::bsky::graph::follow::RecordData as FollowRecordData;
 use atrium_api::app::bsky::notification::list_notifications;
@@ -133,15 +133,15 @@ pub enum WorkRequest {
     /// keyed by the file path instead of a URL — the main thread tells
     /// local reads from network fetches by the non-`http` key prefix.
     ReadImageFile { path: String },
-    /// Create a new top-level post or reply via
-    /// `com.atproto.repo.createRecord` with collection
-    /// `app.bsky.feed.post`. `reply_to: None` ⇒ top-level; `Some(_)` ⇒
-    /// reply (parent + root strong refs).
-    CreatePost {
-        text: String,
+    /// Create a post, or a thread of connected self-replies, via
+    /// `com.atproto.repo.createRecord`. `segments` has ≥1 entry; >1 posts
+    /// a chain where each is a reply to the previous (shared root).
+    /// `reply_to: None` ⇒ new top-level thread; `Some(_)` ⇒ the whole
+    /// thread hangs off that target post. Replies with `PostCreated`
+    /// carrying the first post's URI.
+    CreateThread {
+        segments: Vec<ThreadSegment>,
         reply_to: Option<ReplyTarget>,
-        /// Images to attach (uploaded as blobs + embedded). Empty = none.
-        images: Vec<ComposedImage>,
     },
     /// Create a like record (collection `app.bsky.feed.like`) for the
     /// given post. Caller updates UI optimistically; the worker
@@ -222,6 +222,13 @@ pub struct ComposedImage {
     pub bytes: Vec<u8>,
     pub mime: String,
     pub alt: String,
+}
+
+/// One post within a thread: its text + attached images.
+#[derive(Clone, Debug)]
+pub struct ThreadSegment {
+    pub text: String,
+    pub images: Vec<ComposedImage>,
 }
 
 /// One page of timeline posts plus the cursor for the next page. `cursor:
@@ -521,11 +528,9 @@ fn handle_request(client: &AuthClient, req: WorkRequest) -> WorkResponse {
             let bytes = std::fs::read(&path).map_err(|e| format!("read {path}: {e}"));
             WorkResponse::Image { url: path, bytes }
         }
-        WorkRequest::CreatePost {
-            text,
-            reply_to,
-            images,
-        } => create_post(client, text, reply_to, images),
+        WorkRequest::CreateThread { segments, reply_to } => {
+            create_thread(client, segments, reply_to)
+        }
         WorkRequest::CreateLike {
             post_uri,
             post_cid,
@@ -1307,72 +1312,39 @@ fn wrap_engagement_err(is_like: bool, msg: String) -> WorkResponse {
     }
 }
 
-/// Build + submit a new `app.bsky.feed.post` record. Returns the
-/// AT-URI of the created post on success.
-fn create_post(
-    client: &AuthClient,
-    text: String,
-    reply_to: Option<ReplyTarget>,
-    images: Vec<ComposedImage>,
-) -> WorkResponse {
+/// Build a typed `ReplyRef` from root/parent (uri, cid) strong refs.
+fn build_reply_ref(
+    root_uri: String,
+    root_cid: atrium_api::types::string::Cid,
+    parent_uri: String,
+    parent_cid: atrium_api::types::string::Cid,
+) -> ReplyRef {
     use atrium_api::com::atproto::repo::strong_ref::MainData as StrongRefData;
-    use atrium_api::types::string::Cid;
-
-    let did_str = match block_on(client.agent.did()) {
-        Some(d) => d.to_string(),
-        None => {
-            return WorkResponse::PostCreated(Err(
-                "agent has no session DID — not logged in".into(),
-            ));
+    ReplyRefData {
+        parent: StrongRefData {
+            cid: parent_cid,
+            uri: parent_uri,
         }
-    };
-    let repo = match AtIdentifier::from_str(&did_str) {
-        Ok(id) => id,
-        Err(e) => {
-            return WorkResponse::PostCreated(Err(format!(
-                "DID parse failed for {did_str:?}: {e}"
-            )));
+        .into(),
+        root: StrongRefData {
+            cid: root_cid,
+            uri: root_uri,
         }
-    };
+        .into(),
+    }
+    .into()
+}
 
-    // Translate ReplyTarget → atrium ReplyRefData if present.
-    let reply = match reply_to {
-        Some(rt) => {
-            let parent_cid = match Cid::from_str(&rt.parent_cid) {
-                Ok(c) => c,
-                Err(e) => {
-                    return WorkResponse::PostCreated(Err(format!(
-                        "parent cid parse: {e}"
-                    )));
-                }
-            };
-            let root_cid = match Cid::from_str(&rt.root_cid) {
-                Ok(c) => c,
-                Err(e) => {
-                    return WorkResponse::PostCreated(Err(format!("root cid parse: {e}")));
-                }
-            };
-            Some(
-                ReplyRefData {
-                    parent: StrongRefData {
-                        cid: parent_cid,
-                        uri: rt.parent_uri,
-                    }
-                    .into(),
-                    root: StrongRefData {
-                        cid: root_cid,
-                        uri: rt.root_uri,
-                    }
-                    .into(),
-                }
-                .into(),
-            )
-        }
-        None => None,
-    };
-
-    // Upload each image as a blob, then build the images embed. Any
-    // upload failure aborts the post with the error surfaced to the UI.
+/// Create one `app.bsky.feed.post` record (uploading + embedding its
+/// images). Returns the new post's `(uri, cid)` for chaining.
+fn create_one_post(
+    client: &AuthClient,
+    repo: AtIdentifier,
+    text: String,
+    reply: Option<ReplyRef>,
+    images: Vec<ComposedImage>,
+) -> Result<(String, atrium_api::types::string::Cid), String> {
+    // Upload each image as a blob, then build the images embed.
     let embed = if images.is_empty() {
         None
     } else {
@@ -1381,12 +1353,10 @@ fn create_post(
 
         let mut items = Vec::with_capacity(images.len());
         for img in images {
-            let blob = match block_on(client.agent.api.com.atproto.repo.upload_blob(img.bytes)) {
-                Ok(o) => o.data.blob,
-                Err(e) => {
-                    return WorkResponse::PostCreated(Err(format!("uploadBlob: {e}")));
-                }
-            };
+            let blob = block_on(client.agent.api.com.atproto.repo.upload_blob(img.bytes))
+                .map_err(|e| format!("uploadBlob: {e}"))?
+                .data
+                .blob;
             items.push(
                 ImageData {
                     alt: img.alt,
@@ -1414,32 +1384,20 @@ fn create_post(
         tags: None,
     };
 
-    // atrium's typed RecordData doesn't carry `$type` — Bluesky's
-    // server requires it on createRecord. Round-trip through serde_json
-    // to inject it before converting to the wire-shape `Unknown`.
-    let mut json = match serde_json::to_value(&record) {
-        Ok(v) => v,
-        Err(e) => return WorkResponse::PostCreated(Err(format!("serialize: {e}"))),
-    };
+    // atrium's typed RecordData omits `$type` — inject it via a serde_json
+    // round-trip before converting to the wire-shape `Unknown`.
+    let mut json = serde_json::to_value(&record).map_err(|e| format!("serialize: {e}"))?;
     if let serde_json::Value::Object(map) = &mut json {
         map.insert(
             "$type".to_string(),
             serde_json::Value::String("app.bsky.feed.post".to_string()),
         );
     } else {
-        return WorkResponse::PostCreated(Err(
-            "post record didn't serialize as a JSON object".into(),
-        ));
+        return Err("post record didn't serialize as a JSON object".into());
     }
-    let unknown: Unknown = match serde_json::from_value(json) {
-        Ok(u) => u,
-        Err(e) => return WorkResponse::PostCreated(Err(format!("re-deserialize: {e}"))),
-    };
-
-    let collection = match Nsid::from_str("app.bsky.feed.post") {
-        Ok(n) => n,
-        Err(e) => return WorkResponse::PostCreated(Err(format!("nsid parse: {e}"))),
-    };
+    let unknown: Unknown =
+        serde_json::from_value(json).map_err(|e| format!("re-deserialize: {e}"))?;
+    let collection = Nsid::from_str("app.bsky.feed.post").map_err(|e| format!("nsid parse: {e}"))?;
     let input = create_record::InputData {
         collection,
         record: unknown,
@@ -1448,10 +1406,85 @@ fn create_post(
         swap_commit: None,
         validate: None,
     };
-    match block_on(client.agent.api.com.atproto.repo.create_record(input.into())) {
-        Ok(o) => WorkResponse::PostCreated(Ok(o.data.uri)),
-        Err(e) => WorkResponse::PostCreated(Err(format!("{e}"))),
+    let o = block_on(client.agent.api.com.atproto.repo.create_record(input.into()))
+        .map_err(|e| format!("{e}"))?;
+    Ok((o.data.uri, o.data.cid))
+}
+
+/// Post one-or-more connected segments as a thread. Each segment after
+/// the first is a self-reply to the previous; all share one root. If
+/// `reply_to` is set, the whole thread hangs off that target post.
+/// Returns the first post's AT-URI.
+fn create_thread(
+    client: &AuthClient,
+    segments: Vec<ThreadSegment>,
+    reply_to: Option<ReplyTarget>,
+) -> WorkResponse {
+    use atrium_api::types::string::Cid;
+    if segments.is_empty() {
+        return WorkResponse::PostCreated(Err("empty thread".into()));
     }
+    let did_str = match block_on(client.agent.did()) {
+        Some(d) => d.to_string(),
+        None => return WorkResponse::PostCreated(Err("not logged in".into())),
+    };
+    let repo = match AtIdentifier::from_str(&did_str) {
+        Ok(id) => id,
+        Err(e) => return WorkResponse::PostCreated(Err(format!("DID parse: {e}"))),
+    };
+
+    // Seed root/parent from the reply target, if any.
+    let (mut root, mut parent): (Option<(String, Cid)>, Option<(String, Cid)>) = match reply_to {
+        Some(rt) => {
+            let root_cid = match Cid::from_str(&rt.root_cid) {
+                Ok(c) => c,
+                Err(e) => return WorkResponse::PostCreated(Err(format!("root cid: {e}"))),
+            };
+            let parent_cid = match Cid::from_str(&rt.parent_cid) {
+                Ok(c) => c,
+                Err(e) => return WorkResponse::PostCreated(Err(format!("parent cid: {e}"))),
+            };
+            (
+                Some((rt.root_uri, root_cid)),
+                Some((rt.parent_uri, parent_cid)),
+            )
+        }
+        None => (None, None),
+    };
+
+    let total = segments.len();
+    let mut first_uri: Option<String> = None;
+    for (i, seg) in segments.into_iter().enumerate() {
+        let reply = match (&root, &parent) {
+            (Some((ru, rc)), Some((pu, pc))) => {
+                Some(build_reply_ref(ru.clone(), rc.clone(), pu.clone(), pc.clone()))
+            }
+            // First post of a brand-new top-level thread: no reply ref.
+            _ => None,
+        };
+        let (uri, cid) =
+            match create_one_post(client, repo.clone(), seg.text, reply, seg.images) {
+                Ok(v) => v,
+                Err(e) => {
+                    let msg = if i == 0 {
+                        e
+                    } else {
+                        format!("posted {i}/{total}, then failed: {e}")
+                    };
+                    return WorkResponse::PostCreated(Err(msg));
+                }
+            };
+        if first_uri.is_none() {
+            first_uri = Some(uri.clone());
+        }
+        // For a new top-level thread, the first post becomes the root.
+        if root.is_none() {
+            root = Some((uri.clone(), cid.clone()));
+        }
+        // Every subsequent segment replies to this one.
+        parent = Some((uri, cid));
+    }
+    WorkResponse::PostCreated(Ok(first_uri.unwrap_or_default()))
 }
 
 /// Download a video blob via `com.atproto.sync.getBlob` and write it
