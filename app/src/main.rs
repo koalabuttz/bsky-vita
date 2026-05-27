@@ -33,6 +33,10 @@ use bsky_worker::{WorkResponse, Worker};
 
 fn main() {
     bsky_log::init("ux0:/data/BSKY00001/run.log");
+    // Grant access to the OS photo gallery (ux0:picture/ albums) — without
+    // this the sandbox hides CAMERA/SCREENSHOT/etc. Uses a 'static
+    // mount-point string (the mount retains the pointer).
+    bsky_media::fs::mount_photo_gallery();
     let mut render = match Render::init() {
         Ok(r) => r,
         Err(e) => {

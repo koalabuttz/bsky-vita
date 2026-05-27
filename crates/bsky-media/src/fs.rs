@@ -19,6 +19,32 @@ pub struct DirEntry {
     pub is_dir: bool,
 }
 
+/// Mount the photo gallery so the sandboxed app can browse `ux0:picture/`
+/// albums (CAMERA / SCREENSHOT / …). Without this, those OS-managed album
+/// folders return ENOENT even though `ux0:picture/` itself is listable.
+/// `sceAppMgrAppDataMount` id 100 = photo0; the chosen mount point is
+/// incidental (the access surfaces under the existing `ux0:picture/`).
+/// Non-fatal; call once at startup. Returns true on success.
+#[cfg(target_os = "vita")]
+pub fn mount_photo_gallery() -> bool {
+    use vitasdk_sys as sce;
+    // The mount-point string must stay valid for the LIFETIME OF THE MOUNT
+    // — sceAppMgrAppDataMount retains the pointer, it does not copy. A
+    // temporary CString is freed when this fn returns, leaving the FS
+    // layer a dangling pointer it later writes its mount UID into → heap
+    // corruption (a deterministic _free_r crash ~25 s later). Use a
+    // 'static NUL-terminated byte literal so the pointer is valid forever.
+    let mp = b"ux0:photo\0".as_ptr() as *const core::ffi::c_char;
+    let r = unsafe { sce::sceAppMgrAppDataMount(100, mp) };
+    bsky_log::log!("mount_photo_gallery: sceAppMgrAppDataMount(100) -> {r:#x}");
+    r == 0
+}
+
+#[cfg(not(target_os = "vita"))]
+pub fn mount_photo_gallery() -> bool {
+    false
+}
+
 /// List the entries of `path`. Directories are flagged via `is_dir` so
 /// the picker can render folder vs file affordances. Returns entries in
 /// the order the filesystem yields them (caller sorts).
