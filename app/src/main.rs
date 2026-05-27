@@ -147,6 +147,14 @@ fn main() {
                     bytes: Ok(b),
                 } = &resp
                 {
+                    if !url.starts_with("http") {
+                        // Local file read (picker thumbnail / compose
+                        // preview): forward the raw bytes untouched. The
+                        // screen downscales via Texture::decode_scaled so
+                        // a multi-megapixel decode never lands in the
+                        // shared avatar/embed cache.
+                        resp
+                    } else {
                     match texture_cache.insert(url.clone(), b) {
                         Ok(()) => {
                             // Apply circular alpha mask to avatars so
@@ -169,6 +177,7 @@ fn main() {
                                 bytes: Err(format!("decode: {e}")),
                             }
                         }
+                    }
                     }
                 } else {
                     resp

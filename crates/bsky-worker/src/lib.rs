@@ -128,6 +128,11 @@ pub enum WorkRequest {
     /// machinery. The URL is echoed back in the response so the main
     /// thread can dispatch the result to the right cache key.
     FetchImage { url: String },
+    /// Read a LOCAL image file off the Vita filesystem (for picker
+    /// thumbnails + the compose preview). Reuses the `Image` response,
+    /// keyed by the file path instead of a URL — the main thread tells
+    /// local reads from network fetches by the non-`http` key prefix.
+    ReadImageFile { path: String },
     /// Create a new top-level post or reply via
     /// `com.atproto.repo.createRecord` with collection
     /// `app.bsky.feed.post`. `reply_to: None` ⇒ top-level; `Some(_)` ⇒
@@ -135,6 +140,8 @@ pub enum WorkRequest {
     CreatePost {
         text: String,
         reply_to: Option<ReplyTarget>,
+        /// Images to attach (uploaded as blobs + embedded). Empty = none.
+        images: Vec<ComposedImage>,
     },
     /// Create a like record (collection `app.bsky.feed.like`) for the
     /// given post. Caller updates UI optimistically; the worker
@@ -205,6 +212,16 @@ pub struct ReplyTarget {
     pub parent_cid: String,
     pub root_uri: String,
     pub root_cid: String,
+}
+
+/// One image to attach to a post: pre-encoded bytes (PNG or JPEG) plus
+/// its MIME type. `alt` is accessibility text (empty in v1). The worker
+/// uploads the bytes via `uploadBlob` then embeds the returned blob ref.
+#[derive(Clone, Debug)]
+pub struct ComposedImage {
+    pub bytes: Vec<u8>,
+    pub mime: String,
+    pub alt: String,
 }
 
 /// One page of timeline posts plus the cursor for the next page. `cursor:
@@ -500,7 +517,15 @@ fn handle_request(client: &AuthClient, req: WorkRequest) -> WorkResponse {
             let bytes = fetch_image_bytes(&url);
             WorkResponse::Image { url, bytes }
         }
-        WorkRequest::CreatePost { text, reply_to } => create_post(client, text, reply_to),
+        WorkRequest::ReadImageFile { path } => {
+            let bytes = std::fs::read(&path).map_err(|e| format!("read {path}: {e}"));
+            WorkResponse::Image { url: path, bytes }
+        }
+        WorkRequest::CreatePost {
+            text,
+            reply_to,
+            images,
+        } => create_post(client, text, reply_to, images),
         WorkRequest::CreateLike {
             post_uri,
             post_cid,
@@ -1288,6 +1313,7 @@ fn create_post(
     client: &AuthClient,
     text: String,
     reply_to: Option<ReplyTarget>,
+    images: Vec<ComposedImage>,
 ) -> WorkResponse {
     use atrium_api::com::atproto::repo::strong_ref::MainData as StrongRefData;
     use atrium_api::types::string::Cid;
@@ -1345,11 +1371,42 @@ fn create_post(
         None => None,
     };
 
+    // Upload each image as a blob, then build the images embed. Any
+    // upload failure aborts the post with the error surfaced to the UI.
+    let embed = if images.is_empty() {
+        None
+    } else {
+        use atrium_api::app::bsky::embed::images::{ImageData, Main, MainData};
+        use atrium_api::app::bsky::feed::post::RecordEmbedRefs;
+
+        let mut items = Vec::with_capacity(images.len());
+        for img in images {
+            let blob = match block_on(client.agent.api.com.atproto.repo.upload_blob(img.bytes)) {
+                Ok(o) => o.data.blob,
+                Err(e) => {
+                    return WorkResponse::PostCreated(Err(format!("uploadBlob: {e}")));
+                }
+            };
+            items.push(
+                ImageData {
+                    alt: img.alt,
+                    aspect_ratio: None,
+                    image: blob,
+                }
+                .into(),
+            );
+        }
+        let main: Main = MainData { images: items }.into();
+        Some(Union::Refs(RecordEmbedRefs::AppBskyEmbedImagesMain(
+            Box::new(main),
+        )))
+    };
+
     let record = PostRecordData {
         text,
         created_at: Datetime::now(),
         reply,
-        embed: None,
+        embed,
         entities: None,
         facets: None,
         labels: None,

@@ -179,6 +179,14 @@ name = "bsky-log"
 version = "0.1.0"
 
 [[package]]
+name = "bsky-media"
+version = "0.1.0"
+dependencies = [
+ "bsky-log",
+ "vitasdk-sys",
+]
+
+[[package]]
 name = "bsky-models"
 version = "0.1.0"
 dependencies = [
@@ -214,6 +222,7 @@ dependencies = [
  "bsky-ime",
  "bsky-input",
  "bsky-log",
+ "bsky-media",
  "bsky-render",
  "bsky-video",
  "bsky-worker",
@@ -237,6 +246,7 @@ dependencies = [
  "bsky-ime",
  "bsky-input",
  "bsky-log",
+ "bsky-media",
  "bsky-models",
  "bsky-net",
  "bsky-render",

@@ -418,6 +418,74 @@ impl Texture {
         }
     }
 
+    /// Decode `bytes` (PNG/JPEG) and downscale to fit within `max_w ×
+    /// max_h`, preserving aspect ratio and never upscaling. The full-
+    /// resolution decode is freed before returning, so a multi-megapixel
+    /// source never lingers in memory — essential for the picker's
+    /// thumbnail grid and the compose preview.
+    #[cfg(target_os = "vita")]
+    pub fn decode_scaled(bytes: &[u8], max_w: u32, max_h: u32) -> Result<Self, RenderError> {
+        // vita2d decodes PNG to 4-byte RGBA but JPEG to 3-byte RGB, so the
+        // source bytes-per-pixel depends on the input format. Detect it
+        // from the magic bytes; the destination is always RGBA8.
+        let src_bpp: usize = if bytes.len() >= 8 && &bytes[..8] == b"\x89PNG\r\n\x1a\n" {
+            4
+        } else {
+            3
+        };
+        let full = Self::from_image_bytes(bytes)?;
+        let sw = full.width.max(1) as u32;
+        let sh = full.height.max(1) as u32;
+        let scale = (max_w as f32 / sw as f32)
+            .min(max_h as f32 / sh as f32)
+            .min(1.0);
+        let tw = ((sw as f32 * scale).round() as u32).max(1);
+        let th = ((sh as f32 * scale).round() as u32).max(1);
+
+        unsafe {
+            let src_stride = ffi::vita2d_texture_get_stride(full.ptr.as_ptr()) as usize;
+            let src_base = ffi::vita2d_texture_get_datap(full.ptr.as_ptr()) as *const u8;
+            if src_base.is_null() || src_stride == 0 {
+                return Err(RenderError::TextureLoad("decode_scaled: null source data"));
+            }
+            let p = ffi::vita2d_create_empty_texture_format(
+                tw,
+                th,
+                vitasdk_sys::SCE_GXM_TEXTURE_FORMAT_A8B8G8R8 as core::ffi::c_uint,
+            );
+            let dst = Self::wrap_raw(p, "RGBA (scaled)")?;
+            let dst_stride = ffi::vita2d_texture_get_stride(dst.ptr.as_ptr()) as usize;
+            let dst_base = ffi::vita2d_texture_get_datap(dst.ptr.as_ptr()) as *mut u8;
+            if dst_base.is_null() || dst_stride == 0 {
+                return Err(RenderError::TextureLoad("decode_scaled: null dest data"));
+            }
+            // Nearest-neighbour downsample. Read `src_bpp` bytes/pixel
+            // (3=RGB, 4=RGBA) and write 4 (RGBA, opaque alpha for RGB).
+            // Using src_stride per row is correct even with row padding.
+            for dy in 0..th as usize {
+                let sy = (dy as u32 * sh / th) as usize;
+                let src_row = src_base.add(sy * src_stride);
+                let dst_row = dst_base.add(dy * dst_stride);
+                for dx in 0..tw as usize {
+                    let sx = (dx as u32 * sw / tw) as usize;
+                    let s = src_row.add(sx * src_bpp);
+                    let d = dst_row.add(dx * 4);
+                    *d = *s;
+                    *d.add(1) = *s.add(1);
+                    *d.add(2) = *s.add(2);
+                    *d.add(3) = if src_bpp == 4 { *s.add(3) } else { 0xFF };
+                }
+            }
+            Ok(dst)
+        }
+    }
+
+    #[cfg(not(target_os = "vita"))]
+    pub fn decode_scaled(bytes: &[u8], max_w: u32, max_h: u32) -> Result<Self, RenderError> {
+        let _ = (bytes, max_w, max_h);
+        Err(RenderError::NotOnVita)
+    }
+
     pub fn width(&self) -> i32 {
         self.width
     }

@@ -1,0 +1,13 @@
+[package]
+name = "bsky-media"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Filesystem listing, camera capture, and JPEG encode for image posting"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+vitasdk-sys = { workspace = true }
+bsky-log    = { path = "../bsky-log" }

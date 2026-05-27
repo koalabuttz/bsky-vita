@@ -19,9 +19,10 @@ use std::sync::Arc;
 use bsky_auth::AuthClient;
 use bsky_ime::{Ime, ImeMode, ImeState, TextBoxMode};
 use bsky_input::buttons;
-use bsky_render::{theme, Font, Frame, SCREEN_HEIGHT, SCREEN_WIDTH};
-use bsky_worker::{ReplyTarget, WorkRequest, WorkResponse};
+use bsky_render::{theme, Font, Frame, Texture, SCREEN_HEIGHT, SCREEN_WIDTH};
+use bsky_worker::{ComposedImage, ReplyTarget, WorkRequest, WorkResponse};
 
+use crate::file_picker::{FilePicker, PickResult};
 use crate::screen::{Screen, ScreenAction};
 use crate::widget::{button, ButtonState, Rect, UiCtx};
 
@@ -29,6 +30,14 @@ use crate::widget::{button, ButtonState, Rect, UiCtx};
 /// `chars().count()` — adequate for ASCII + most Latin/CJK; users
 /// composing emoji-heavy posts may see slight over-/under-counts.
 const POST_LIMIT: usize = 300;
+
+/// Max size of the attached-image preview texture in the compose strip.
+const PREVIEW_W: u32 = 152;
+const PREVIEW_H: u32 = 100;
+
+/// Height of the close bar in the full-screen image view; the image is
+/// fit + centered in the area below it so the bar never covers it.
+const FULLVIEW_BAR_H: i32 = 30;
 
 #[derive(Default)]
 enum ComposeState {
@@ -58,6 +67,24 @@ pub struct ComposeScreen {
     cancel_btn: ButtonState,
     post_btn: ButtonState,
     text_area_btn: ButtonState,
+    add_image_btn: ButtonState,
+    remove_img_btn: ButtonState,
+    /// Modal file picker; `Some` while the user is choosing an image.
+    picker: Option<FilePicker>,
+    /// Path of the chosen image (the upload source; step 5 reads + uploads
+    /// these bytes).
+    attached_path: Option<String>,
+    /// Decoded preview of the attached image (downscaled). `None` while
+    /// loading or if decode failed.
+    preview: Option<Texture>,
+    /// Raw bytes of the attached image — kept for the full-screen preview
+    /// and the step-5 upload. `None` when nothing is attached.
+    attached_bytes: Option<Vec<u8>>,
+    /// Full-screen image-preview modal: tapping the thumbnail opens it.
+    viewing_full: bool,
+    full_tex: Option<Texture>,
+    preview_btn: ButtonState,
+    full_close_btn: ButtonState,
     /// Set to `true` by `handle_worker_response` on a successful post.
     /// The next `frame()` returns `Pop`.
     done: bool,
@@ -78,6 +105,16 @@ impl ComposeScreen {
             cancel_btn: ButtonState::default(),
             post_btn: ButtonState::default(),
             text_area_btn: ButtonState::default(),
+            add_image_btn: ButtonState::default(),
+            remove_img_btn: ButtonState::default(),
+            picker: None,
+            attached_path: None,
+            preview: None,
+            attached_bytes: None,
+            viewing_full: false,
+            full_tex: None,
+            preview_btn: ButtonState::default(),
+            full_close_btn: ButtonState::default(),
             done: false,
         }
     }
@@ -88,9 +125,18 @@ impl ComposeScreen {
 
     fn can_post(&self) -> bool {
         let n = self.char_count();
-        matches!(self.state, ComposeState::Editing | ComposeState::Error(_))
-            && n > 0
-            && n <= POST_LIMIT
+        if n > POST_LIMIT
+            || !matches!(self.state, ComposeState::Editing | ComposeState::Error(_))
+        {
+            return false;
+        }
+        // If an image is attached, hold Post until its bytes have loaded
+        // (otherwise we'd post without the intended image).
+        if self.attached_path.is_some() && self.attached_bytes.is_none() {
+            return false;
+        }
+        // Post needs text OR an image.
+        n > 0 || self.attached_path.is_some()
     }
 }
 
@@ -106,6 +152,71 @@ impl Screen for ComposeScreen {
         //        pop the screen on this frame. ───────────────────────
         if self.done {
             return ScreenAction::Pop;
+        }
+
+        // ─── 0b. Modal file picker takes over the whole frame. ─────────
+        if self.picker.is_some() {
+            match self.picker.as_mut().unwrap().render(frame, font, ctx) {
+                Some(PickResult::Picked(path)) => {
+                    // Request the full bytes to build a preview (and, in
+                    // step 5, to upload). Keyed by path → arrives via
+                    // handle_worker_response once the picker is closed.
+                    self.preview = None;
+                    self.attached_bytes = None;
+                    self.full_tex = None; // discard prior image's full view
+                    if let Some(worker) = ctx.worker {
+                        worker.send(WorkRequest::ReadImageFile { path: path.clone() });
+                    }
+                    self.attached_path = Some(path);
+                    self.picker = None;
+                }
+                Some(PickResult::Cancelled) => self.picker = None,
+                None => {}
+            }
+            return ScreenAction::None;
+        }
+
+        // ─── 0c. Full-screen image preview modal. ──────────────────────
+        if self.viewing_full {
+            frame.fill_rect(
+                0.0,
+                0.0,
+                SCREEN_WIDTH as f32,
+                SCREEN_HEIGHT as f32,
+                bsky_render::Color::rgb(0x00, 0x00, 0x00),
+            );
+            if let Some(tex) = &self.full_tex {
+                // Center in the area BELOW the close bar so the bar never
+                // covers the image.
+                let dx = (SCREEN_WIDTH - tex.width()) / 2;
+                let dy = FULLVIEW_BAR_H + (SCREEN_HEIGHT - FULLVIEW_BAR_H - tex.height()) / 2;
+                frame.draw_texture(tex, dx as f32, dy as f32);
+            }
+            frame.fill_rect(0.0, 0.0, SCREEN_WIDTH as f32, FULLVIEW_BAR_H as f32, theme::FIELD_BG);
+            frame.draw_text(
+                font,
+                12,
+                21,
+                theme::TEXT_PRIMARY,
+                0.9,
+                "Tap, or press O / X, to close",
+            );
+            let pressed_now = !ctx.touches.is_empty();
+            let tapped =
+                self.full_close_btn.pressed_last && !pressed_now && ctx.touches.is_empty();
+            self.full_close_btn.pressed_last = pressed_now;
+            if tapped
+                || ctx.pad.just_pressed(buttons::CIRCLE)
+                || ctx.pad.just_pressed(buttons::CROSS)
+            {
+                // Keep `full_tex` alive — freeing it now (same frame it was
+                // just drawn) makes the GPU read freed memory → GPUCRASH.
+                // It's freed later on Remove/Change, in a frame where it
+                // isn't drawn. Reused if the user reopens the full view.
+                self.viewing_full = false;
+                self.full_close_btn.pressed_last = false;
+            }
+            return ScreenAction::None;
         }
 
         // ─── 1. Drain pending IME result into the text buffer. ─────────
@@ -180,9 +291,28 @@ impl Screen for ComposeScreen {
         );
         if post_clicked {
             if let Some(worker) = ctx.worker {
+                // Build the image attachment from the loaded bytes (mime by
+                // extension). can_post() guarantees bytes are present if a
+                // path is attached.
+                let images = match (&self.attached_bytes, &self.attached_path) {
+                    (Some(bytes), Some(path)) => {
+                        let mime = if path.to_ascii_lowercase().ends_with(".png") {
+                            "image/png"
+                        } else {
+                            "image/jpeg"
+                        };
+                        vec![ComposedImage {
+                            bytes: bytes.clone(),
+                            mime: mime.to_string(),
+                            alt: String::new(),
+                        }]
+                    }
+                    _ => Vec::new(),
+                };
                 worker.send(WorkRequest::CreatePost {
                     text: self.text.clone(),
                     reply_to: self.reply_to.clone(),
+                    images,
                 });
                 self.state = ComposeState::Submitting;
             }
@@ -204,12 +334,18 @@ impl Screen for ComposeScreen {
         }
 
         // ─── 5. Text area (tappable). ──────────────────────────────────
+        // Reserve a strip below the text area for the image attachment
+        // controls (Phase 7).
         let counter_h = 32;
+        // Tall enough for the preview only when something is attached; a
+        // single Add-image button row otherwise (no dead space).
+        let attach_h = if self.attached_path.is_some() { 112 } else { 44 };
+        let area_h = SCREEN_HEIGHT - content_top - counter_h - 12 - attach_h - 8;
         let area_rect = Rect::new(
             12.0,
             content_top as f32,
             SCREEN_WIDTH as f32 - 24.0,
-            (SCREEN_HEIGHT - content_top - counter_h - 12) as f32,
+            area_h as f32,
         );
         // Faint background to indicate the tappable region.
         frame.fill_rect(
@@ -261,6 +397,88 @@ impl Screen for ComposeScreen {
             );
         }
 
+        // ─── 5b. Attachment area: Add/Change + preview + Remove. ───────
+        let attach_y = content_top + area_h + 8;
+        let add_label = if self.attached_path.is_some() {
+            "Change image"
+        } else {
+            "Add image"
+        };
+        if button(
+            frame,
+            font,
+            Rect::new(12.0, attach_y as f32, 150.0, 40.0),
+            add_label,
+            &mut self.add_image_btn,
+            ctx,
+            interactive,
+        ) {
+            self.picker = Some(FilePicker::new());
+        }
+        // Owned clone so we don't hold a borrow on self across the Remove
+        // mutation below.
+        if let Some(path) = self.attached_path.clone() {
+            if button(
+                frame,
+                font,
+                Rect::new(12.0, (attach_y + 48) as f32, 150.0, 40.0),
+                "Remove",
+                &mut self.remove_img_btn,
+                ctx,
+                interactive,
+            ) {
+                self.attached_path = None;
+                self.preview = None;
+                self.attached_bytes = None;
+                self.full_tex = None; // safe: not in full-view this frame
+            } else {
+                let px = 176;
+                let has_preview = self.preview.is_some();
+                if let Some(tex) = &self.preview {
+                    frame.draw_texture(tex, px as f32, attach_y as f32);
+                } else {
+                    frame.draw_text(font, px, attach_y + 24, theme::TEXT_MUTED, 0.9, "loading preview…");
+                }
+                // Tap the preview → full-screen view.
+                let preview_rect =
+                    Rect::new(px as f32, attach_y as f32, PREVIEW_W as f32, PREVIEW_H as f32);
+                if has_preview
+                    && button_invisible(frame, preview_rect, &mut self.preview_btn, ctx, interactive)
+                {
+                    // Decode the full-size texture once; reuse it on reopen.
+                    if self.full_tex.is_none() {
+                        if let Some(b) = &self.attached_bytes {
+                            self.full_tex = Texture::decode_scaled(
+                                b,
+                                SCREEN_WIDTH as u32,
+                                (SCREEN_HEIGHT - FULLVIEW_BAR_H) as u32,
+                            )
+                            .ok();
+                        }
+                    }
+                    self.viewing_full = true;
+                }
+                let name = path.rsplit('/').next().unwrap_or(path.as_str());
+                let shown: String = name.chars().take(40).collect();
+                frame.draw_text(
+                    font,
+                    px + PREVIEW_W as i32 + 14,
+                    attach_y + 24,
+                    theme::TEXT_PRIMARY,
+                    0.9,
+                    &shown,
+                );
+                frame.draw_text(
+                    font,
+                    px + PREVIEW_W as i32 + 14,
+                    attach_y + 50,
+                    theme::TEXT_MUTED,
+                    0.8,
+                    "tap to view full size",
+                );
+            }
+        }
+
         // ─── 6. Char counter + Submitting/Error overlays. ──────────────
         let n = self.char_count();
         let count_str = format!("{n} / {POST_LIMIT}");
@@ -304,6 +522,19 @@ impl Screen for ComposeScreen {
     }
 
     fn handle_worker_response(&mut self, resp: WorkResponse) {
+        // Route local-file image reads (picker thumbnails) into the picker.
+        if let WorkResponse::Image { url, bytes } = &resp {
+            if let Some(picker) = self.picker.as_mut() {
+                picker.on_image(url, bytes);
+            } else if self.attached_path.as_deref() == Some(url.as_str()) {
+                // Bytes for the attached image → build the compose preview.
+                if let Ok(b) = bytes {
+                    self.preview = Texture::decode_scaled(b, PREVIEW_W, PREVIEW_H).ok();
+                    self.attached_bytes = Some(b.clone());
+                }
+            }
+            return;
+        }
         if let WorkResponse::PostCreated(result) = resp {
             match result {
                 Ok(_uri) => {

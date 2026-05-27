@@ -40,6 +40,9 @@ bsky-worker = { path = "../crates/bsky-worker" }
 # Phase 5.3: video playback (sceAvPlayer + sceAudioOut wrappers).
 bsky-video  = { path = "../crates/bsky-video" }
 
+# Phase 7: media plumbing for image posting (fs listing, camera, jpeg).
+bsky-media  = { path = "../crates/bsky-media" }
+
 [[bin]]
 name = "bsky-vita"
 path = "src/main.rs"
