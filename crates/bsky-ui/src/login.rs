@@ -211,13 +211,22 @@ impl Screen for LoginScreen {
             LoginState::Done(_) | LoginState::_Transitioning => { /* handled above */ }
         }
 
-        // Bottom hint line.
+        // Bottom hint lines. The second nudges users to enable DM access
+        // on the app password — without it, chat.bsky.* calls fail with a
+        // bad-token-scope error (surfaced in-app as "DMs unavailable").
         frame.draw_text_centered(
             font,
-            SCREEN_HEIGHT - 20,
+            SCREEN_HEIGHT - 36,
             theme::TEXT_MUTED,
             0.7,
             "Get an app password at bsky.app/settings/app-passwords",
+        );
+        frame.draw_text_centered(
+            font,
+            SCREEN_HEIGHT - 18,
+            theme::TEXT_MUTED,
+            0.7,
+            "Tip: enable \"Allow access to your direct messages\" for DMs",
         );
 
         // ─── 4. Handle click events (only in Idle/Error). ─────────────

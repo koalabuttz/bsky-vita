@@ -3,6 +3,8 @@
 pub mod camera;
 pub mod cdn;
 pub mod compose;
+pub mod conversation;
+pub mod conversations;
 pub mod embeds;
 pub mod file_picker;
 pub mod image_viewer;
@@ -19,6 +21,8 @@ pub mod video_player;
 pub mod widget;
 
 pub use compose::ComposeScreen;
+pub use conversation::ConversationScreen;
+pub use conversations::ConversationListScreen;
 pub use login::LoginScreen;
 pub use notifications::NotificationsScreen;
 pub use profile::ProfileScreen;

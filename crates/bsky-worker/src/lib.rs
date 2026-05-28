@@ -61,6 +61,14 @@ use atrium_api::app::bsky::notification::list_notifications;
 use atrium_api::app::bsky::notification::list_notifications::Notification;
 use atrium_api::app::bsky::notification::update_seen;
 use atrium_api::com::atproto::repo::{create_record, delete_record};
+use atrium_api::agent::bluesky::{AtprotoServiceType, BSKY_CHAT_DID};
+use atrium_api::chat::bsky::convo::defs::{
+    ConvoView, DeletedMessageView, MessageInputData, MessageView,
+};
+use atrium_api::chat::bsky::convo::get_messages::OutputMessagesItem;
+use atrium_api::chat::bsky::convo::{
+    get_convo_for_members, get_messages, list_convos, send_message, update_read,
+};
 use atrium_api::types::string::{AtIdentifier, Datetime, Did, Nsid, RecordKey};
 use atrium_api::types::{LimitedNonZeroU8, LimitedU16, Union, Unknown};
 use atrium_xrpc::http::Request;
@@ -196,6 +204,27 @@ pub enum WorkRequest {
     /// `app.bsky.graph.getActorStarterPacks`. Used by
     /// ProfileScreen's Packs tab.
     FetchActorStarterPacks { actor: String, cursor: Option<String> },
+    /// List the user's DM conversations via `chat.bsky.convo.listConvos`
+    /// (most-recent-activity first). Cursor-paginated.
+    FetchConvos { cursor: Option<String> },
+    /// Fetch a page of messages in `convo_id` via
+    /// `chat.bsky.convo.getMessages`. `cursor: None` = newest page;
+    /// the cursor pages backward into older history. `convo_id` echoes
+    /// back so a screen can drop responses for a convo it switched away
+    /// from.
+    GetConvoMessages {
+        convo_id: String,
+        cursor: Option<String>,
+    },
+    /// Send `text` to `convo_id` via `chat.bsky.convo.sendMessage`.
+    SendMessage { convo_id: String, text: String },
+    /// Mark `convo_id` read via `chat.bsky.convo.updateRead`.
+    /// Fire-and-forget (the `ConvoRead` response is ignored by screens).
+    MarkConvoRead { convo_id: String },
+    /// Get (or create) the conversation with `members` (DIDs) via
+    /// `chat.bsky.convo.getConvoForMembers`. Used by the profile
+    /// "Message" button to open a 1:1 chat.
+    GetConvoForMembers { members: Vec<String> },
 }
 
 /// Minimal data the caller provides for a reply. The worker translates
@@ -311,6 +340,30 @@ pub struct ThreadBatch {
     pub replies: Vec<PostView>,
 }
 
+/// One page of DM conversations + the next-page cursor (None = end).
+pub struct ConvosBatch {
+    pub convos: Vec<ConvoView>,
+    pub cursor: Option<String>,
+}
+
+/// One message in a conversation — either a live message or a tombstone
+/// for a deleted one. Decoded from atrium's `getMessages` union in the
+/// worker so the UI never touches `Union`.
+#[derive(Clone)]
+pub enum MessageItem {
+    Message(MessageView),
+    Deleted(DeletedMessageView),
+}
+
+/// One page of conversation messages. `messages` is normalized to
+/// **oldest → newest** (the chat API returns newest-first; the worker
+/// reverses each page). `cursor` pages backward into older history
+/// (None = reached the start of the conversation).
+pub struct MessagesBatch {
+    pub messages: Vec<MessageItem>,
+    pub cursor: Option<String>,
+}
+
 /// A completed work item. Each variant's payload mirrors the request that
 /// produced it, with a `Result` because every PDS call can fail.
 pub enum WorkResponse {
@@ -371,6 +424,27 @@ pub enum WorkResponse {
         actor: String,
         batch: Result<ActorStarterPacksBatch, String>,
     },
+    /// One page of the user's DM conversations.
+    Convos(Result<ConvosBatch, String>),
+    /// One page of messages for `convo_id` (oldest→newest). `convo_id`
+    /// is the staleness key so a screen drops pages for a convo it has
+    /// navigated away from.
+    ConvoMessages {
+        convo_id: String,
+        batch: Result<MessagesBatch, String>,
+    },
+    /// The server's view of a just-sent message, for the conversation
+    /// screen to reconcile against its optimistic local row.
+    MessageSent {
+        convo_id: String,
+        result: Result<MessageView, String>,
+    },
+    /// The conversation for a `GetConvoForMembers` request (profile
+    /// "Message" button) — carries the convo to open.
+    ConvoForMembers(Result<ConvoView, String>),
+    /// Ack for a fire-and-forget `MarkConvoRead`. Ignored by screens;
+    /// surfaced only so errors land in the log.
+    ConvoRead(Result<(), String>),
 }
 
 /// Handle to the worker thread. Holds the channel ends and the thread's
@@ -483,6 +557,17 @@ fn log_if_err(resp: &WorkResponse) {
         WorkResponse::ActorStarterPacks { actor, batch: Err(e) } => {
             bsky_log::log!("worker: ActorStarterPacks({actor}) err: {e}")
         }
+        WorkResponse::Convos(Err(e)) => bsky_log::log!("worker: Convos err: {e}"),
+        WorkResponse::ConvoMessages { convo_id, batch: Err(e) } => {
+            bsky_log::log!("worker: ConvoMessages({convo_id}) err: {e}")
+        }
+        WorkResponse::MessageSent { convo_id, result: Err(e) } => {
+            bsky_log::log!("worker: MessageSent({convo_id}) err: {e}")
+        }
+        WorkResponse::ConvoForMembers(Err(e)) => {
+            bsky_log::log!("worker: ConvoForMembers err: {e}")
+        }
+        WorkResponse::ConvoRead(Err(e)) => bsky_log::log!("worker: ConvoRead err: {e}"),
         _ => {}
     }
 }
@@ -587,6 +672,17 @@ fn handle_request(client: &AuthClient, req: WorkRequest) -> WorkResponse {
                 notifications: Vec::new(),
                 cursor: None,
             }))
+        }
+        WorkRequest::FetchConvos { cursor } => fetch_convos(client, cursor),
+        WorkRequest::GetConvoMessages { convo_id, cursor } => {
+            fetch_convo_messages(client, convo_id, cursor)
+        }
+        WorkRequest::SendMessage { convo_id, text } => {
+            send_chat_message(client, convo_id, text)
+        }
+        WorkRequest::MarkConvoRead { convo_id } => mark_convo_read(client, convo_id),
+        WorkRequest::GetConvoForMembers { members } => {
+            fetch_convo_for_members(client, members)
         }
     }
 }
@@ -1035,6 +1131,211 @@ fn fetch_notifications(client: &AuthClient, cursor: Option<String>) -> WorkRespo
             cursor: o.data.cursor,
         })),
         Err(e) => WorkResponse::Notifications(Err(format!("{e}"))),
+    }
+}
+
+// ─── Direct messages (chat.bsky.convo.*) ─────────────────────────────
+//
+// DM endpoints are NOT served by the user's PDS directly — they're
+// proxied to the Bluesky chat service. atrium injects the required
+// `atproto-proxy: did:web:api.bsky.chat#bsky_chat` header when the call
+// is routed through `api_with_proxy(BSKY_CHAT_DID, BskyChat)`. The chat
+// lexicon is compiled in via the `bluesky` feature (→ namespace-chatbsky),
+// so no extra Cargo feature is needed.
+//
+// NOTE: an app password created without "Allow access to your direct
+// messages" fails every chat call with a bad-token-scope error.
+// `map_chat_err` tags those with a `DM_SCOPE:` sentinel so screens can
+// show an actionable message instead of a generic failure.
+
+/// The chat service's DID, parsed once per call (cheap; const string).
+fn chat_did() -> Did {
+    Did::from_str(BSKY_CHAT_DID).expect("BSKY_CHAT_DID is a valid DID")
+}
+
+/// Stringify a chat XRPC error, tagging app-password-scope failures with
+/// a `DM_SCOPE:` prefix the UI keys off. (Flagged: the exact wording is
+/// verified on hardware — broaden the match if the real error differs.)
+fn map_chat_err(e: impl std::fmt::Display) -> String {
+    let s = format!("{e}");
+    let l = s.to_ascii_lowercase();
+    if l.contains("scope") || l.contains("bad token") || l.contains("invalidtoken") {
+        format!("DM_SCOPE: {s}")
+    } else {
+        s
+    }
+}
+
+/// Decode one `getMessages` union item into our flat `MessageItem`.
+/// Drops unknown variants (forward-compat with future message kinds).
+fn decode_message_item(u: Union<OutputMessagesItem>) -> Option<MessageItem> {
+    match u {
+        Union::Refs(OutputMessagesItem::ChatBskyConvoDefsMessageView(m)) => {
+            Some(MessageItem::Message(*m))
+        }
+        Union::Refs(OutputMessagesItem::ChatBskyConvoDefsDeletedMessageView(d)) => {
+            Some(MessageItem::Deleted(*d))
+        }
+        Union::Unknown(_) => None,
+    }
+}
+
+/// List the user's conversations (most-recent-activity first).
+fn fetch_convos(client: &AuthClient, cursor: Option<String>) -> WorkResponse {
+    let limit = LimitedNonZeroU8::<100>::try_from(50)
+        .expect("50 fits in LimitedNonZeroU8<100>");
+    let params = list_convos::ParametersData {
+        cursor,
+        limit: Some(limit),
+        read_state: None,
+        status: None,
+    }
+    .into();
+    match block_on(
+        client
+            .agent
+            .api_with_proxy(chat_did(), AtprotoServiceType::BskyChat)
+            .chat
+            .bsky
+            .convo
+            .list_convos(params),
+    ) {
+        Ok(o) => WorkResponse::Convos(Ok(ConvosBatch {
+            convos: o.data.convos,
+            cursor: o.data.cursor,
+        })),
+        Err(e) => WorkResponse::Convos(Err(map_chat_err(e))),
+    }
+}
+
+/// Fetch a page of messages for `convo_id`. The chat API returns messages
+/// newest-first and the cursor pages *backward* into older history; we
+/// reverse each page to oldest→newest so screens never reason about API
+/// order. `convo_id` is echoed back as the staleness key.
+fn fetch_convo_messages(
+    client: &AuthClient,
+    convo_id: String,
+    cursor: Option<String>,
+) -> WorkResponse {
+    let limit = LimitedNonZeroU8::<100>::try_from(50)
+        .expect("50 fits in LimitedNonZeroU8<100>");
+    let params = get_messages::ParametersData {
+        convo_id: convo_id.clone(),
+        cursor,
+        limit: Some(limit),
+    }
+    .into();
+    match block_on(
+        client
+            .agent
+            .api_with_proxy(chat_did(), AtprotoServiceType::BskyChat)
+            .chat
+            .bsky
+            .convo
+            .get_messages(params),
+    ) {
+        Ok(o) => {
+            let mut messages: Vec<MessageItem> = o
+                .data
+                .messages
+                .into_iter()
+                .filter_map(decode_message_item)
+                .collect();
+            messages.reverse(); // newest-first → oldest→newest
+            WorkResponse::ConvoMessages {
+                convo_id,
+                batch: Ok(MessagesBatch {
+                    messages,
+                    cursor: o.data.cursor,
+                }),
+            }
+        }
+        Err(e) => WorkResponse::ConvoMessages {
+            convo_id,
+            batch: Err(map_chat_err(e)),
+        },
+    }
+}
+
+/// Send a text message to `convo_id`. Returns the server's `MessageView`
+/// so the screen can reconcile its optimistic local row.
+fn send_chat_message(client: &AuthClient, convo_id: String, text: String) -> WorkResponse {
+    let message = MessageInputData {
+        embed: None,
+        facets: None,
+        text,
+    }
+    .into();
+    let input = send_message::InputData {
+        convo_id: convo_id.clone(),
+        message,
+    }
+    .into();
+    match block_on(
+        client
+            .agent
+            .api_with_proxy(chat_did(), AtprotoServiceType::BskyChat)
+            .chat
+            .bsky
+            .convo
+            .send_message(input),
+    ) {
+        Ok(view) => WorkResponse::MessageSent {
+            convo_id,
+            result: Ok(view),
+        },
+        Err(e) => WorkResponse::MessageSent {
+            convo_id,
+            result: Err(map_chat_err(e)),
+        },
+    }
+}
+
+/// Mark `convo_id` read up to its latest message. Fire-and-forget — the
+/// `ConvoRead` response is ignored by screens (logged on error only).
+fn mark_convo_read(client: &AuthClient, convo_id: String) -> WorkResponse {
+    let input = update_read::InputData {
+        convo_id,
+        message_id: None,
+    }
+    .into();
+    match block_on(
+        client
+            .agent
+            .api_with_proxy(chat_did(), AtprotoServiceType::BskyChat)
+            .chat
+            .bsky
+            .convo
+            .update_read(input),
+    ) {
+        Ok(_) => WorkResponse::ConvoRead(Ok(())),
+        Err(e) => WorkResponse::ConvoRead(Err(map_chat_err(e))),
+    }
+}
+
+/// Get (or create) the conversation with `members` (DIDs). Used by the
+/// profile "Message" button to open a chat with an arbitrary user.
+fn fetch_convo_for_members(client: &AuthClient, members: Vec<String>) -> WorkResponse {
+    let dids: Result<Vec<Did>, String> = members
+        .iter()
+        .map(|m| Did::from_str(m).map_err(|e| format!("member DID {m:?}: {e}")))
+        .collect();
+    let members = match dids {
+        Ok(d) => d,
+        Err(e) => return WorkResponse::ConvoForMembers(Err(e)),
+    };
+    let params = get_convo_for_members::ParametersData { members }.into();
+    match block_on(
+        client
+            .agent
+            .api_with_proxy(chat_did(), AtprotoServiceType::BskyChat)
+            .chat
+            .bsky
+            .convo
+            .get_convo_for_members(params),
+    ) {
+        Ok(o) => WorkResponse::ConvoForMembers(Ok(o.data.convo)),
+        Err(e) => WorkResponse::ConvoForMembers(Err(map_chat_err(e))),
     }
 }
 

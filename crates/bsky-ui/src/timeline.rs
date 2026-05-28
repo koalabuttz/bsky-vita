@@ -1128,6 +1128,12 @@ impl Screen for TimelineScreen {
             WorkResponse::ActorFeeds { .. }
             | WorkResponse::ActorLists { .. }
             | WorkResponse::ActorStarterPacks { .. } => {}
+            // DM responses belong to the conversation screens.
+            WorkResponse::Convos(_)
+            | WorkResponse::ConvoMessages { .. }
+            | WorkResponse::MessageSent { .. }
+            | WorkResponse::ConvoForMembers(_)
+            | WorkResponse::ConvoRead(_) => {}
         }
     }
 }

@@ -1383,6 +1383,47 @@ impl<'r> Frame<'r> {
         y_cursor
     }
 
+    /// Max line width actually used when wrapping `text` to `max_w`
+    /// (≤ `max_w`). Companion to `measure_text_wrapped_with_emoji`, for
+    /// shrink-to-fit layouts like chat bubbles. Mirrors the same greedy
+    /// word-wrap; falls back to plain `measure_text` per word when no
+    /// emoji atlas is supplied.
+    pub fn measure_text_wrapped_width_with_emoji(
+        &self,
+        font: &Font,
+        max_w: i32,
+        scale: f32,
+        text: &str,
+        emoji: Option<&EmojiAtlas>,
+    ) -> i32 {
+        if text.is_empty() {
+            return 0;
+        }
+        let space_w = self.measure_text(font, scale, " ").0;
+        let mut max_used = 0;
+        for paragraph in text.split('\n') {
+            let mut line_width: i32 = 0;
+            let mut has_words = false;
+            for word in paragraph.split_whitespace() {
+                let w = match emoji {
+                    Some(atlas) => self.measure_word_with_emoji(font, scale, word, atlas),
+                    None => self.measure_text(font, scale, word).0,
+                };
+                let needed = if !has_words { w } else { space_w + w };
+                if line_width + needed <= max_w {
+                    line_width += needed;
+                    has_words = true;
+                } else {
+                    max_used = max_used.max(line_width);
+                    line_width = w;
+                    has_words = true;
+                }
+            }
+            max_used = max_used.max(line_width);
+        }
+        max_used.min(max_w)
+    }
+
     // ─── Private helpers for emoji-aware rendering ────────────────
 
     /// Width of `word` (no whitespace, may contain emoji codepoints) at

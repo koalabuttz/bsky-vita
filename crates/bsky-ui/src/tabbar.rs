@@ -24,6 +24,7 @@ pub enum TopLevel {
     Home,
     Search,
     Notifications,
+    Messages,
     Profile,
 }
 
@@ -33,15 +34,17 @@ impl TopLevel {
             TopLevel::Home => "Home",
             TopLevel::Search => "Search",
             TopLevel::Notifications => "Notifs",
+            TopLevel::Messages => "DMs",
             TopLevel::Profile => "Profile",
         }
     }
 
-    fn all() -> [TopLevel; 4] {
+    fn all() -> [TopLevel; 5] {
         [
             TopLevel::Home,
             TopLevel::Search,
             TopLevel::Notifications,
+            TopLevel::Messages,
             TopLevel::Profile,
         ]
     }
@@ -54,6 +57,7 @@ pub struct TabBar {
     home: ButtonState,
     search: ButtonState,
     notifications: ButtonState,
+    messages: ButtonState,
     profile: ButtonState,
 }
 
@@ -64,6 +68,7 @@ impl TabBar {
             home: ButtonState::default(),
             search: ButtonState::default(),
             notifications: ButtonState::default(),
+            messages: ButtonState::default(),
             profile: ButtonState::default(),
         }
     }
@@ -80,7 +85,7 @@ impl TabBar {
         frame.fill_rect(0.0, y as f32, w as f32, h as f32, theme::FIELD_BG);
         frame.fill_rect(0.0, y as f32, w as f32, 1.0, theme::TEXT_MUTED);
 
-        let cell_w = w / 4;
+        let cell_w = w / 5;
         let mut clicked: Option<TopLevel> = None;
 
         for (i, tab) in TopLevel::all().iter().enumerate() {
@@ -90,6 +95,7 @@ impl TabBar {
                 TopLevel::Home => &mut self.home,
                 TopLevel::Search => &mut self.search,
                 TopLevel::Notifications => &mut self.notifications,
+                TopLevel::Messages => &mut self.messages,
                 TopLevel::Profile => &mut self.profile,
             };
             let pressed_now = ctx.touches.iter().any(|t| rect.contains(t.x, t.y));

@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use atrium_api::app::bsky::actor::defs::ProfileViewDetailedData;
 use atrium_api::app::bsky::feed::defs::{FeedViewPost, FeedViewPostReasonRefs, GeneratorView};
+use atrium_api::chat::bsky::convo::defs::ConvoView;
 use atrium_api::app::bsky::graph::defs::{ListView, StarterPackViewBasic};
 use atrium_api::types::Union;
 use bsky_auth::AuthClient;
@@ -25,6 +26,7 @@ use bsky_worker::{FeedSource, WorkRequest, WorkResponse};
 use bsky_input::buttons;
 
 use crate::compose::ComposeScreen;
+use crate::conversation::ConversationScreen;
 use crate::thread::ThreadScreen;
 use crate::timeline::{detect_post_tap_action, toggle_engagement, EngagementKind, TapAction};
 use crate::video_player::VideoPlayerScreen;
@@ -187,6 +189,18 @@ pub struct ProfileScreen {
     /// Tap state for the Follow / Unfollow button (rendered only when
     /// `actor.is_some()`, i.e. viewing somebody else's profile).
     follow_btn: ButtonState,
+    /// Tap state for the "Message" (open DM) button on other profiles.
+    message_btn: ButtonState,
+    /// True while a `GetConvoForMembers` is in flight (disables the
+    /// Message button so a double-tap doesn't open two conversations).
+    messaging: bool,
+    /// Error from the last DM-open attempt (e.g. a `DM_SCOPE:` scope
+    /// failure), shown briefly under the action buttons.
+    dm_error: Option<String>,
+    /// Set when a conversation is ready to open; consumed at the top of
+    /// the next `frame()` as a `Push` (navigation can't happen inside
+    /// `handle_worker_response`).
+    pending_open_convo: Option<ConvoView>,
     /// Active sub-tab. Default `Posts`.
     active_tab: ProfileTab,
     /// Tap state for each pill in the sub-tab strip (parallel to
@@ -237,6 +251,10 @@ impl ProfileScreen {
             inflight_banner: None,
             tab_bar: TabBar::new(TopLevel::Profile),
             follow_btn: ButtonState::default(),
+            message_btn: ButtonState::default(),
+            messaging: false,
+            dm_error: None,
+            pending_open_convo: None,
             active_tab: ProfileTab::Posts,
             tab_pill_btns: Default::default(),
             scroll_y: 0.0,
@@ -661,6 +679,16 @@ impl Screen for ProfileScreen {
         ctx: &UiCtx,
         _ime: &mut Ime,
     ) -> ScreenAction {
+        // A DM conversation became ready (from the "Message" button) —
+        // open it. Done here because navigation can't happen inside
+        // `handle_worker_response`.
+        if let Some(convo) = self.pending_open_convo.take() {
+            return ScreenAction::Push(Box::new(ConversationScreen::new(
+                Arc::clone(&self.client),
+                convo,
+            )));
+        }
+
         // Dispatch the fetch on the first frame. The worker is guaranteed
         // to exist by the AuthComplete invariant (main.rs spawns it before
         // pushing this screen). If it's somehow missing, fall through to
@@ -904,6 +932,10 @@ impl Screen for ProfileScreen {
         let y_offset: i32 = -(self.scroll_y as i32);
 
         let mut toggle_follow_clicked = false;
+        // DID to open a DM with, captured when the Message button is
+        // clicked (so the dispatch happens after the `self.state` borrow
+        // ends below).
+        let mut open_dm_did: Option<String> = None;
         match &self.state {
             ProfileState::Pending => {
                 frame.draw_text_centered(
@@ -917,34 +949,41 @@ impl Screen for ProfileScreen {
             ProfileState::Loaded(p) => {
                 draw_profile(frame, font, p, ctx.texture_cache, ctx.avatar_mask, y_offset);
                 if !self.is_own() {
-                    // Follow / Unfollow button on other actors' profiles.
-                    // Sits in the action-row band between the meta line
-                    // (y=325) and the pill strip (y=374).
+                    // Follow / Unfollow + Message buttons on other actors'
+                    // profiles, side by side. Sits in the action-row band
+                    // between the meta line (y=325) and the pill strip
+                    // (y=374).
                     let following = p
                         .viewer
                         .as_ref()
                         .and_then(|v| v.following.as_deref())
                         .is_some();
                     let label = if following { "Unfollow" } else { "Follow" };
-                    let btn_w = 160.0;
-                    let btn_rect = Rect::new(
-                        (SCREEN_WIDTH as f32 - btn_w) / 2.0,
-                        340.0 + y_offset as f32,
-                        btn_w,
-                        30.0,
-                    );
-                    let clicked = button(
-                        frame,
-                        font,
-                        btn_rect,
-                        label,
-                        &mut self.follow_btn,
-                        ctx,
-                        true,
-                    );
-                    if clicked {
+                    let btn_w = 150.0;
+                    let gap = 12.0;
+                    let total = btn_w * 2.0 + gap;
+                    let left_x = (SCREEN_WIDTH as f32 - total) / 2.0;
+                    let btn_y = 340.0 + y_offset as f32;
+                    let follow_rect = Rect::new(left_x, btn_y, btn_w, 30.0);
+                    if button(frame, font, follow_rect, label, &mut self.follow_btn, ctx, true) {
                         toggle_follow_clicked = true;
                     }
+                    let msg_rect = Rect::new(left_x + btn_w + gap, btn_y, btn_w, 30.0);
+                    let msg_label = if self.messaging { "Opening…" } else { "Message" };
+                    if button(
+                        frame,
+                        font,
+                        msg_rect,
+                        msg_label,
+                        &mut self.message_btn,
+                        ctx,
+                        !self.messaging,
+                    ) {
+                        open_dm_did = Some(p.did.as_str().to_string());
+                    }
+                    // The DM-open error is drawn as a bottom toast at the
+                    // end of frame() (the action band here is too cramped —
+                    // the sub-tab pill strip at y=374 would cover it).
                 }
             }
             ProfileState::Error(msg) => {
@@ -969,6 +1008,21 @@ impl Screen for ProfileScreen {
         // borrow on `self.state` ends first.
         if toggle_follow_clicked {
             self.toggle_follow(ctx);
+        }
+
+        // Open-DM: dispatch getConvoForMembers for the tapped actor. The
+        // response arrives as `ConvoForMembers`, which stashes the convo
+        // in `pending_open_convo` for the next frame to push.
+        if let Some(did) = open_dm_did {
+            if !self.messaging {
+                if let Some(worker) = ctx.worker {
+                    self.dm_error = None;
+                    self.messaging = true;
+                    worker.send(WorkRequest::GetConvoForMembers {
+                        members: vec![did],
+                    });
+                }
+            }
         }
 
         // ─── Tab content + sub-tab pill strip ───────────────────────
@@ -1308,6 +1362,25 @@ impl Screen for ProfileScreen {
             }
         }
 
+        // DM-open error toast — drawn LAST so the sub-tab pill strip
+        // (y=374) can't cover it. Only other-actor profiles set
+        // `dm_error`, and those render to the screen bottom (no tab bar),
+        // so a bottom strip is unobstructed.
+        if !self.is_own() {
+            if let Some(err) = &self.dm_error {
+                let msg = dm_error_message(err);
+                let bar_y = SCREEN_HEIGHT - 34;
+                frame.fill_rect(
+                    0.0,
+                    bar_y as f32,
+                    SCREEN_WIDTH as f32,
+                    34.0,
+                    theme::FIELD_BG,
+                );
+                frame.draw_text_centered(font, bar_y + 22, theme::ERROR, 0.85, msg);
+            }
+        }
+
         // Top-level (own profile) renders the tab bar and treats CIRCLE
         // as a no-op. Pushed sub-screen (other actor's profile) skips
         // the tab bar and pops on CIRCLE.
@@ -1451,7 +1524,37 @@ impl Screen for ProfileScreen {
             WorkResponse::SearchActors(_) | WorkResponse::SearchPosts(_) => {}
             WorkResponse::Notifications(_) => {}
             WorkResponse::VideoBlob { .. } => {}
+            // The "Message" button's getConvoForMembers result: stash the
+            // convo to open on the next frame (or surface the error).
+            WorkResponse::ConvoForMembers(Ok(convo)) => {
+                self.messaging = false;
+                self.dm_error = None;
+                self.pending_open_convo = Some(convo);
+            }
+            WorkResponse::ConvoForMembers(Err(e)) => {
+                self.messaging = false;
+                self.dm_error = Some(e);
+            }
+            // Other DM responses belong to the conversation screens.
+            WorkResponse::Convos(_)
+            | WorkResponse::ConvoMessages { .. }
+            | WorkResponse::MessageSent { .. }
+            | WorkResponse::ConvoRead(_) => {}
         }
+    }
+}
+
+/// Map a `getConvoForMembers` error into a short, actionable message
+/// for the DM-open toast. Recognizes the common chat-service rejections.
+fn dm_error_message(err: &str) -> &'static str {
+    if err.starts_with("DM_SCOPE:") {
+        "This app password can't access DMs."
+    } else if err.contains("NotFollowedBySender") {
+        "They only accept DMs from people they follow."
+    } else if err.contains("Recipient") || err.contains("disabled") || err.contains("cannot") {
+        "This user isn't accepting messages."
+    } else {
+        "Couldn't open conversation."
     }
 }
 

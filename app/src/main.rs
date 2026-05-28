@@ -26,8 +26,8 @@ use bsky_auth::AuthClient;
 use bsky_input::{Pad, Touch};
 use bsky_render::{EmojiAtlas, Render, Texture, TextureCache};
 use bsky_ui::{
-    LoginScreen, NotificationsScreen, ProfileScreen, Screen, ScreenAction, SearchScreen,
-    TimelineScreen, TopLevel, UiCtx,
+    ConversationListScreen, LoginScreen, NotificationsScreen, ProfileScreen, Screen, ScreenAction,
+    SearchScreen, TimelineScreen, TopLevel, UiCtx,
 };
 use bsky_worker::{WorkResponse, Worker};
 
@@ -246,5 +246,6 @@ fn make_top_level(target: TopLevel, client: Arc<AuthClient>) -> Box<dyn Screen> 
         TopLevel::Profile => Box::new(ProfileScreen::new(client, None)),
         TopLevel::Notifications => Box::new(NotificationsScreen::new(client)),
         TopLevel::Search => Box::new(SearchScreen::new(client)),
+        TopLevel::Messages => Box::new(ConversationListScreen::new(client)),
     }
 }
