@@ -100,6 +100,27 @@ pub fn wait_rendering_done() {
 #[cfg(not(target_os = "vita"))]
 pub fn wait_rendering_done() {}
 
+/// Whether color video rendering is available on this console.
+///
+/// Color playback (Phase 5.3.x.1) compiles a custom GXM YUV→RGB fragment
+/// shader at runtime via the `libshacccg.suprx` system module. On a
+/// homebrew Vita that module is not present by default — it has to be
+/// extracted by the user — so the compile fails and callers must fall
+/// back to the no-shader greyscale path ([`Texture::upload_luma`]).
+///
+/// The first call triggers a one-shot shader compile and caches the
+/// outcome (`OnceLock`) for the process lifetime, so it is cheap to call
+/// every frame. Returns `false` on non-Vita targets (and host tests).
+#[cfg(target_os = "vita")]
+pub fn video_color_supported() -> bool {
+    video_shader::ensure_pipeline().is_some()
+}
+
+#[cfg(not(target_os = "vita"))]
+pub fn video_color_supported() -> bool {
+    false
+}
+
 
 /// 32-bit RGBA color matching vita2d's `RGBA8` macro layout: alpha in the
 /// MSB, then blue, then green, then red in the LSB. Construct via
@@ -631,6 +652,32 @@ impl Texture {
         Err(RenderError::NotOnVita)
     }
 
+    /// Create an empty `w × h` single-channel luma texture (`U8_1RRR`,
+    /// i.e. standard L8): the texture-unit swizzle replicates the stored
+    /// byte to R=G=B and forces alpha opaque, so vita2d's *stock*
+    /// textured shader draws it as greyscale with **zero per-pixel CPU
+    /// work**. Stream a decoded video Y plane straight in via
+    /// [`upload_luma`] — this is the no-shader video fallback used when
+    /// [`video_color_supported`] is `false` (1 byte/pixel + hardware DMA,
+    /// vs. the 4 bytes/pixel uncached CPU spread an RGBA texture needs).
+    #[cfg(target_os = "vita")]
+    pub fn new_luma(w: u32, h: u32) -> Result<Self, RenderError> {
+        let p = unsafe {
+            ffi::vita2d_create_empty_texture_format(
+                w,
+                h,
+                vitasdk_sys::SCE_GXM_TEXTURE_FORMAT_U8_1RRR as core::ffi::c_uint,
+            )
+        };
+        Self::wrap_raw(p, "luma empty")
+    }
+
+    #[cfg(not(target_os = "vita"))]
+    pub fn new_luma(w: u32, h: u32) -> Result<Self, RenderError> {
+        let _ = (w, h);
+        Err(RenderError::NotOnVita)
+    }
+
     /// Copy a tightly-packed `width × height × 4` RGBA buffer into this
     /// texture (respecting its stride). For per-frame camera upload.
     #[cfg(target_os = "vita")]
@@ -660,6 +707,58 @@ impl Texture {
     #[cfg(not(target_os = "vita"))]
     pub fn upload_rgba(&self, rgba: &[u8]) {
         let _ = rgba;
+    }
+
+    /// Copy a decoded luma (Y) plane into this `U8_1RRR` luma texture
+    /// (create it with [`Texture::new_luma`]). Because the texture is one
+    /// byte per pixel and the sampler does the grey expansion, the Y plane
+    /// copies in verbatim — no per-pixel CPU spread. The whole plane is
+    /// hardware-DMA'd in one shot when the source pitch matches the
+    /// texture stride (the common case for 8-aligned widths); otherwise it
+    /// DMAs row by row. This keeps the no-shader video fallback fast enough
+    /// to watch (the previous RGBA spread did 4 uncached `u32` writes per
+    /// pixel on the CPU and was unwatchably slow at full resolution).
+    ///
+    /// `y_pitch` is the source plane's row stride in bytes (sceAvPlayer
+    /// pads Y rows to the frame width); the texture's own stride is honored
+    /// on the destination side.
+    #[cfg(target_os = "vita")]
+    pub fn upload_luma(&self, y: &[u8], y_pitch: usize) {
+        unsafe {
+            let stride = ffi::vita2d_texture_get_stride(self.ptr.as_ptr()) as usize;
+            let base = ffi::vita2d_texture_get_datap(self.ptr.as_ptr()) as *mut u8;
+            if base.is_null() || stride == 0 {
+                return;
+            }
+            let w = self.width.max(0) as usize;
+            let h = self.height.max(0) as usize;
+            if y_pitch < w || y.len() < y_pitch * h {
+                return;
+            }
+            if y_pitch == stride && y.len() >= stride * h {
+                // Contiguous: one hardware-DMA copy of the whole plane.
+                vitasdk_sys::sceDmacMemcpy(
+                    base as *mut core::ffi::c_void,
+                    y.as_ptr() as *const core::ffi::c_void,
+                    (stride * h) as u32,
+                );
+            } else {
+                // Pitch mismatch (unaligned width): DMA each row into the
+                // texture's padded stride.
+                for row in 0..h {
+                    vitasdk_sys::sceDmacMemcpy(
+                        base.add(row * stride) as *mut core::ffi::c_void,
+                        y.as_ptr().add(row * y_pitch) as *const core::ffi::c_void,
+                        w as u32,
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "vita"))]
+    pub fn upload_luma(&self, y: &[u8], y_pitch: usize) {
+        let _ = (y, y_pitch);
     }
 
     /// Encode `s` as a QR code and upload it to a fresh RGBA texture.

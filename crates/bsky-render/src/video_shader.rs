@@ -510,7 +510,27 @@ pub fn ensure_pipeline() -> Option<&'static VideoShaderPipeline> {
 }
 
 fn init_pipeline() -> Option<VideoShaderPipeline> {
-    unsafe {
+    // 1. Prefer bundled precompiled GXP. Needs no libshacccg.suprx, so
+    //    color video works on every console. The .gxp blobs are a capture
+    //    of the runtime compile below; GXP is final GPU bytecode, identical
+    //    across all Vitas (same SGX543), so a blob compiled once on any
+    //    device runs everywhere.
+    if let Some((vert, frag)) = load_bundled_gxp() {
+        bsky_log::log!(
+            "video shader: loading bundled GXP ({}B vert + {}B frag, no SHACCCG)",
+            vert.len(),
+            frag.len()
+        );
+        if let Some(p) = build_pipeline_from_blobs(vert, frag) {
+            return Some(p);
+        }
+        bsky_log::log!("video shader: bundled GXP failed to register; trying runtime compile");
+    }
+
+    // 2. Runtime compile via libshacccg.suprx — the source of truth used to
+    //    capture the bundled blobs, and the path on dev builds before the
+    //    .gxp is bundled. Falls through to greyscale (None) if absent.
+    let (vert_blob, frag_blob) = unsafe {
         // Load SHACCCG sysmodule. The system path
         // (sceSysmoduleLoadModule) only works on setups where a
         // substitution plugin like ShaRKBR33D is installed alongside
@@ -572,7 +592,61 @@ fn init_pipeline() -> Option<VideoShaderPipeline> {
             bsky_log::log!("video shader: fragment compile failed");
             return None;
         };
+        (vert_blob, frag_blob)
+    };
 
+    // Capture the freshly-compiled blobs (one-time, best-effort) so they
+    // can be pulled off the device and bundled into app/static/.
+    capture_gxp(&vert_blob, &frag_blob);
+
+    build_pipeline_from_blobs(vert_blob, frag_blob)
+}
+
+/// Read the bundled precompiled GXP blobs packed into the VPK at `app0:`.
+/// Returns the `(vertex, fragment)` program bytes when both are present
+/// and non-empty, else `None` (dev builds before capture). `std::fs::read`
+/// returns a clean `Err` on a missing file — unlike vita2d's loaders,
+/// which crash — so probing is safe.
+fn load_bundled_gxp() -> Option<(Vec<u8>, Vec<u8>)> {
+    let vert = std::fs::read("app0:video_yuv_v.gxp").ok()?;
+    let frag = std::fs::read("app0:video_yuv_f.gxp").ok()?;
+    if vert.is_empty() || frag.is_empty() {
+        return None;
+    }
+    Some((vert, frag))
+}
+
+/// One-time capture of a successful runtime compile: write the GXP blobs
+/// to the data dir so they can be pulled off the device (`make fetch-gxp`)
+/// and bundled into `app/static/`, after which `load_bundled_gxp` serves
+/// them and libshacccg.suprx is no longer needed by anyone. No-op once
+/// both files exist; best-effort (a failed write just means re-capture).
+fn capture_gxp(vert: &[u8], frag: &[u8]) {
+    const VPATH: &str = "ux0:data/BSKY00001/video_yuv_v.gxp";
+    const FPATH: &str = "ux0:data/BSKY00001/video_yuv_f.gxp";
+    if std::fs::metadata(VPATH).is_ok() && std::fs::metadata(FPATH).is_ok() {
+        return;
+    }
+    let ok_v = std::fs::write(VPATH, vert).is_ok();
+    let ok_f = std::fs::write(FPATH, frag).is_ok();
+    bsky_log::log!(
+        "video shader: captured GXP (vert {}B ok={}, frag {}B ok={}) -> {} ; \
+         FTP both into app/static/ to bundle",
+        vert.len(), ok_v, frag.len(), ok_f, VPATH
+    );
+}
+
+/// Register two GXP program blobs with vita2d's shader patcher and build
+/// the draw pipeline. Shared by the bundled-GXP and runtime-compile paths
+/// (the blobs are byte-identical either way). Takes ownership of the blobs
+/// and moves them into the returned struct — the patcher's registered
+/// programs reference that memory, so it must outlive them (moving a `Vec`
+/// keeps its heap buffer fixed, so the raw pointers stay valid).
+fn build_pipeline_from_blobs(
+    vert_blob: Vec<u8>,
+    frag_blob: Vec<u8>,
+) -> Option<VideoShaderPipeline> {
+    unsafe {
         // Register programs with vita2d's shader patcher.
         let patcher = ffi::vita2d_get_shader_patcher();
         if patcher.is_null() {

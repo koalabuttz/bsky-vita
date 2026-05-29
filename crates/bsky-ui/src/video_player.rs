@@ -26,17 +26,37 @@ use std::sync::Arc;
 use bsky_auth::AuthClient;
 use bsky_ime::Ime;
 use bsky_input::buttons;
-use bsky_render::{theme, Font, Frame, YuvTexture, SCREEN_HEIGHT, SCREEN_WIDTH};
+use bsky_render::{theme, Font, Frame, Texture, YuvTexture, SCREEN_HEIGHT, SCREEN_WIDTH};
 use bsky_video::{AudioOut, PlayerState, VideoPlayer};
 use bsky_worker::{WorkRequest, WorkResponse};
 
 use crate::screen::{Screen, ScreenAction};
-use crate::widget::UiCtx;
+use crate::widget::{button, ButtonState, Rect, UiCtx};
 
 const SEEK_STEP_US: u64 = 10_000_000; // 10 seconds in microseconds
 /// Auto-hide the transport overlay this many frames after the last
 /// input (60 fps × 3 s).
 const OVERLAY_HIDE_FRAMES: u32 = 180;
+
+/// Marker file whose presence means the user ticked "Don't show this
+/// again" on the greyscale-video notice. Lives in the app data dir
+/// alongside the session files.
+fn notice_flag_path() -> String {
+    format!("{}/greyscale_notice_dismissed", bsky_auth::DATA_DIR)
+}
+
+/// Whether the user has previously suppressed the greyscale notice.
+fn notice_was_dismissed() -> bool {
+    std::fs::metadata(notice_flag_path()).is_ok()
+}
+
+/// Persist the "don't show again" choice (best-effort; a failed write
+/// just means the notice shows again next time).
+fn persist_notice_dismissed() {
+    if let Err(e) = std::fs::write(notice_flag_path(), b"") {
+        bsky_log::log!("greyscale notice: persist failed: {e}");
+    }
+}
 
 enum VideoState {
     /// First-frame dispatch hasn't fired yet.
@@ -49,7 +69,16 @@ enum VideoState {
     Playing {
         player: VideoPlayer,
         audio: AudioOut,
+        /// Color path: three luma textures + GXM YUV→RGB shader. `None`
+        /// in greyscale mode.
         tex: Option<YuvTexture>,
+        /// Greyscale fallback: a single RGBA8 texture (Y spread to
+        /// R=G=B) drawn with vita2d's stock shader — no
+        /// `libshacccg.suprx` needed. `None` in color mode.
+        grey_tex: Option<Texture>,
+        /// Decided once at playback start: `true` when the console lacks
+        /// the shader compiler and we render greyscale.
+        greyscale: bool,
         // Cached so we don't re-create the texture every frame.
         tex_w: u32,
         tex_h: u32,
@@ -68,6 +97,14 @@ pub struct VideoPlayerScreen {
     /// Frames since the last input. When >= OVERLAY_HIDE_FRAMES, the
     /// overlay is hidden.
     overlay_idle: u32,
+    /// Greyscale-fallback notice modal: armed when playback starts
+    /// without color support and the user hasn't previously ticked
+    /// "Don't show this again".
+    show_notice: bool,
+    /// Live state of the "Don't show this again" checkbox.
+    notice_dont_show: bool,
+    notice_ok_btn: ButtonState,
+    notice_check: ButtonState,
 }
 
 impl VideoPlayerScreen {
@@ -78,11 +115,95 @@ impl VideoPlayerScreen {
             cid,
             state: VideoState::Pending,
             overlay_idle: 0,
+            show_notice: false,
+            notice_dont_show: false,
+            notice_ok_btn: ButtonState::default(),
+            notice_check: ButtonState::default(),
         }
     }
 
     fn show_overlay(&self) -> bool {
         self.overlay_idle < OVERLAY_HIDE_FRAMES
+    }
+
+    /// Close the greyscale notice, persisting the suppression flag if the
+    /// "Don't show this again" box is ticked. Routed from the Got-it
+    /// button, a CROSS press, or a CIRCLE press while the notice is up.
+    fn dismiss_notice(&mut self) {
+        if self.notice_dont_show {
+            persist_notice_dismissed();
+        }
+        self.show_notice = false;
+    }
+
+    /// Draw the greyscale-fallback dialog over the (live) video and route
+    /// its input. Called last in `frame()` so it composites on top.
+    fn draw_greyscale_notice(&mut self, frame: &mut Frame, font: &Font, ctx: &UiCtx) {
+        let pw = 640.0_f32;
+        let ph = 252.0_f32;
+        let px = (SCREEN_WIDTH as f32 - pw) / 2.0;
+        let py = (SCREEN_HEIGHT as f32 - ph) / 2.0;
+
+        // 2px ACCENT border, then the FIELD_BG panel inside it. No alpha
+        // dim — the greyscale video stays visible around the dialog.
+        frame.fill_rect(px - 2.0, py - 2.0, pw + 4.0, ph + 4.0, theme::ACCENT);
+        frame.fill_rect(px, py, pw, ph, theme::FIELD_BG);
+
+        let pad = 24;
+        frame.draw_text(
+            font,
+            px as i32 + pad,
+            py as i32 + 44,
+            theme::TEXT_PRIMARY,
+            1.25,
+            "Playing in greyscale",
+        );
+        frame.draw_text_wrapped(
+            font,
+            px as i32 + pad,
+            py as i32 + 78,
+            pw as i32 - pad * 2,
+            theme::TEXT_MUTED,
+            0.95,
+            "Color video needs the system shader module (libshacccg.suprx), \
+             which isn't installed on this console. Audio and greyscale video \
+             work fine without it.",
+        );
+
+        // Checkbox. The hit-rect spans the box + its label so either is
+        // tappable; a clean tap (down-inside, up-with-no-touch) toggles.
+        let box_sz = 26.0_f32;
+        let box_x = px + pad as f32;
+        let box_y = py + ph - 102.0;
+        let check_rect = Rect::new(box_x, box_y - 4.0, 300.0, box_sz + 8.0);
+        let pressed_now = ctx.touches.iter().any(|t| check_rect.contains(t.x, t.y));
+        let toggled =
+            self.notice_check.pressed_last && !pressed_now && ctx.touches.is_empty();
+        self.notice_check.pressed_last = pressed_now;
+        if toggled {
+            self.notice_dont_show = !self.notice_dont_show;
+        }
+        // Box: muted border, BACKGROUND interior, ACCENT fill when ticked.
+        frame.fill_rect(box_x, box_y, box_sz, box_sz, theme::TEXT_MUTED);
+        frame.fill_rect(box_x + 2.0, box_y + 2.0, box_sz - 4.0, box_sz - 4.0, theme::BACKGROUND);
+        if self.notice_dont_show {
+            frame.fill_rect(box_x + 6.0, box_y + 6.0, box_sz - 12.0, box_sz - 12.0, theme::ACCENT);
+        }
+        frame.draw_text(
+            font,
+            (box_x + box_sz + 12.0) as i32,
+            (box_y + box_sz - 5.0) as i32,
+            theme::TEXT_PRIMARY,
+            0.95,
+            "Don't show this again",
+        );
+
+        // Got-it button + CROSS/CIRCLE all dismiss.
+        let ok_rect = Rect::new(px + pw - 160.0, py + ph - 60.0, 136.0, 40.0);
+        let ok_clicked = button(frame, font, ok_rect, "Got it", &mut self.notice_ok_btn, ctx, true);
+        if ok_clicked || ctx.pad.just_pressed(buttons::CROSS) {
+            self.dismiss_notice();
+        }
     }
 }
 
@@ -96,7 +217,13 @@ impl Screen for VideoPlayerScreen {
     ) -> ScreenAction {
         // ─── Input handling ──────────────────────────────────────────
         if ctx.pad.just_pressed(buttons::CIRCLE) {
-            return ScreenAction::Pop;
+            if self.show_notice {
+                // CIRCLE dismisses the greyscale dialog rather than
+                // backing out of the video entirely.
+                self.dismiss_notice();
+            } else {
+                return ScreenAction::Pop;
+            }
         }
         let any_input = ctx.pad.current != ctx.pad.previous || !ctx.touches.is_empty();
         if any_input {
@@ -120,10 +247,19 @@ impl Screen for VideoPlayerScreen {
             let path = file_path.clone();
             match VideoPlayer::open(&path) {
                 Ok(player) => {
+                    // Probe color support once (triggers the one-shot
+                    // shader compile). Without libshacccg.suprx we render
+                    // greyscale and surface the one-time notice.
+                    let greyscale = !bsky_render::video_color_supported();
+                    if greyscale && !notice_was_dismissed() {
+                        self.show_notice = true;
+                    }
                     self.state = VideoState::Playing {
                         player,
                         audio: AudioOut::new(),
                         tex: None,
+                        grey_tex: None,
+                        greyscale,
                         tex_w: 0,
                         tex_h: 0,
                     };
@@ -135,9 +271,15 @@ impl Screen for VideoPlayerScreen {
             }
         }
 
+        // Transport controls are suppressed while the greyscale notice is
+        // up (so the dismissing tap/press doesn't also seek or pause).
+        let notice_up = self.show_notice;
+
         // Playing-state input handling + frame pulls.
-        if let VideoState::Playing { player, audio, tex, tex_w, tex_h } = &mut self.state {
-            if ctx.pad.just_pressed(buttons::SQUARE) {
+        if let VideoState::Playing { player, audio, tex, grey_tex, greyscale, tex_w, tex_h } =
+            &mut self.state
+        {
+            if !notice_up && ctx.pad.just_pressed(buttons::SQUARE) {
                 match player.state() {
                     PlayerState::Playing => player.pause(),
                     PlayerState::Paused => player.resume(),
@@ -148,33 +290,63 @@ impl Screen for VideoPlayerScreen {
                     }
                 }
             }
-            if ctx.pad.just_pressed(buttons::LEFT) {
+            if !notice_up && ctx.pad.just_pressed(buttons::LEFT) {
                 let now = player.current_time_us();
                 let target = now.saturating_sub(SEEK_STEP_US);
                 player.jump_to_time_us(target);
             }
-            if ctx.pad.just_pressed(buttons::RIGHT) {
+            if !notice_up && ctx.pad.just_pressed(buttons::RIGHT) {
                 let now = player.current_time_us();
                 player.jump_to_time_us(now + SEEK_STEP_US);
             }
 
             // Pull the latest video frame (if any). On size change,
-            // (re)create the texture.
+            // (re)create the texture for the active render path.
             if let Some(yuv) = player.next_video_frame() {
-                if *tex_w != yuv.width || *tex_h != yuv.height || tex.is_none() {
-                    match YuvTexture::create(yuv.width, yuv.height) {
-                        Ok(t) => {
-                            *tex = Some(t);
-                            *tex_w = yuv.width;
-                            *tex_h = yuv.height;
+                let size_changed = *tex_w != yuv.width || *tex_h != yuv.height;
+                if *greyscale {
+                    // Greyscale: single RGBA8 texture, stock shader.
+                    if size_changed || grey_tex.is_none() {
+                        // Sync the GPU before dropping the old texture on a
+                        // size change (GPU defer-drop rule).
+                        if size_changed && grey_tex.is_some() {
+                            bsky_render::wait_rendering_done();
                         }
-                        Err(e) => {
-                            bsky_log::log!("YUV texture create failed: {e}");
+                        match Texture::new_luma(yuv.width, yuv.height) {
+                            Ok(t) => {
+                                *grey_tex = Some(t);
+                                *tex_w = yuv.width;
+                                *tex_h = yuv.height;
+                            }
+                            Err(e) => {
+                                bsky_log::log!("grey video texture create failed: {e}");
+                            }
                         }
                     }
-                }
-                if let Some(t) = tex.as_mut() {
-                    t.upload(yuv.y, yuv.y_pitch, yuv.uv, yuv.uv_pitch);
+                    if let Some(t) = grey_tex.as_ref() {
+                        // Sync before overwriting texture data the GPU may
+                        // still be sampling from last frame (tearing on
+                        // motion) — mirrors YuvTexture::upload.
+                        bsky_render::wait_rendering_done();
+                        t.upload_luma(yuv.y, yuv.y_pitch);
+                    }
+                } else {
+                    // Color: three luma textures + GXM YUV→RGB shader.
+                    if size_changed || tex.is_none() {
+                        match YuvTexture::create(yuv.width, yuv.height) {
+                            Ok(t) => {
+                                *tex = Some(t);
+                                *tex_w = yuv.width;
+                                *tex_h = yuv.height;
+                            }
+                            Err(e) => {
+                                bsky_log::log!("YUV texture create failed: {e}");
+                            }
+                        }
+                    }
+                    if let Some(t) = tex.as_mut() {
+                        t.upload(yuv.y, yuv.y_pitch, yuv.uv, yuv.uv_pitch);
+                    }
                 }
             }
             // Pull a small batch of audio chunks per render frame.
@@ -223,10 +395,15 @@ impl Screen for VideoPlayerScreen {
                     "Opening…",
                 );
             }
-            VideoState::Playing { player, tex, tex_w, tex_h, .. } => {
-                if let Some(t) = tex.as_ref() {
-                    let (_sx, _sy, dx, dy, dw, dh) =
-                        aspect_fit(*tex_w, *tex_h);
+            VideoState::Playing { player, tex, grey_tex, greyscale, tex_w, tex_h, .. } => {
+                let (s, _sy, dx, dy, dw, dh) = aspect_fit(*tex_w, *tex_h);
+                if *greyscale {
+                    // No-shader fallback: RGBA8 luma texture (Y spread to
+                    // R=G=B) drawn with vita2d's stock shader, aspect-fit.
+                    if let Some(t) = grey_tex.as_ref() {
+                        frame.draw_texture_scale(t, dx, dy, s, s);
+                    }
+                } else if let Some(t) = tex.as_ref() {
                     // Custom GXM YUV→RGB shader (Phase 5.3.x.1):
                     // three luma textures → fragment shader applies
                     // BT.601 limited-range matrix → opaque RGBA.
@@ -259,6 +436,11 @@ impl Screen for VideoPlayerScreen {
                     "CIRCLE to go back",
                 );
             }
+        }
+
+        // Greyscale-fallback notice composites on top of everything.
+        if self.show_notice {
+            self.draw_greyscale_notice(frame, font, ctx);
         }
 
         ScreenAction::None

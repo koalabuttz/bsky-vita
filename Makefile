@@ -2,7 +2,7 @@ APP_DIR := app
 TITLE_ID := BSKY00001
 VPK := target/armv7-sony-vita-newlibeabihf/release/bsky-vita.vpk
 
-.PHONY: build build-fast run run-fast install push-creds push-font push-emoji push-mask fetch-log test clean help
+.PHONY: build build-fast run run-fast install push-creds push-font push-emoji push-mask push-gxp fetch-log fetch-gxp test clean help
 
 help:
 	@echo "Targets:"
@@ -17,7 +17,9 @@ help:
 	@echo "  push-font    Upload app/static/Inter-Regular.ttf to ux0:/app/$(TITLE_ID)/ (one-shot)"
 	@echo "  push-emoji   Upload app/static/twemoji.png to ux0:/app/$(TITLE_ID)/ (one-shot, ~2.5 MB)"
 	@echo "  push-mask    Upload app/static/avatar_mask_96.png to ux0:/app/$(TITLE_ID)/ (one-shot, ~500 B)"
+	@echo "  push-gxp     Upload app/static/video_yuv_{v,f}.gxp to ux0:/app/$(TITLE_ID)/ (one-shot)"
 	@echo "  fetch-log    Pull ux0:data/$(TITLE_ID)/run.log via vitacompanion FTP"
+	@echo "  fetch-gxp    Pull captured video_yuv_{v,f}.gxp from the device into app/static/"
 	@echo "  test         Host-side library tests (excludes the Vita-target bin)"
 	@echo "  clean        Remove build artifacts"
 	@echo
@@ -125,6 +127,40 @@ push-mask:
 		-T app/static/avatar_mask_field_96.png \
 		"ftp://$$VITA_IP:1337/ux0:/app/$(TITLE_ID)/avatar_mask_field_96.png"
 	@echo "avatar masks pushed (BG + FIELD_BG)."
+
+# Pull the precompiled video-shader GXP blobs the app captured to its data
+# dir (after a successful runtime compile on a console with libshacccg.suprx)
+# into app/static/ so they bake into the VPK. One-time: run the app once with
+# the module present, open a video, then `make fetch-gxp`.
+fetch-gxp:
+	@if [ -z "$$VITA_IP" ]; then echo "VITA_IP env var not set"; exit 1; fi
+	curl -sS --connect-timeout 5 --max-time 30 \
+		-o app/static/video_yuv_v.gxp \
+		"ftp://$$VITA_IP:1337/ux0:/data/$(TITLE_ID)/video_yuv_v.gxp"
+	curl -sS --connect-timeout 5 --max-time 30 \
+		-o app/static/video_yuv_f.gxp \
+		"ftp://$$VITA_IP:1337/ux0:/data/$(TITLE_ID)/video_yuv_f.gxp"
+	@echo "Captured GXP pulled into app/static/:"
+	@ls -l app/static/video_yuv_v.gxp app/static/video_yuv_f.gxp
+
+# Push the bundled precompiled video shaders for fast iteration (mirrors
+# push-font — `make run` only updates eboot.bin, not assets). On a fresh
+# install they bake into the VPK automatically; this is dev-only.
+push-gxp:
+	@if [ -z "$$VITA_IP" ]; then echo "VITA_IP env var not set"; exit 1; fi
+	@if [ ! -f app/static/video_yuv_v.gxp ] || [ ! -f app/static/video_yuv_f.gxp ]; then \
+		echo "app/static/video_yuv_{v,f}.gxp not found."; \
+		echo "Capture first: run the app once with libshacccg.suprx present,"; \
+		echo "open a video, then 'make fetch-gxp'."; \
+		exit 1; \
+	fi
+	curl -sS --connect-timeout 5 --max-time 30 \
+		-T app/static/video_yuv_v.gxp \
+		"ftp://$$VITA_IP:1337/ux0:/app/$(TITLE_ID)/video_yuv_v.gxp"
+	curl -sS --connect-timeout 5 --max-time 30 \
+		-T app/static/video_yuv_f.gxp \
+		"ftp://$$VITA_IP:1337/ux0:/app/$(TITLE_ID)/video_yuv_f.gxp"
+	@echo "Precompiled video shaders pushed (app0:video_yuv_{v,f}.gxp)."
 
 # Library crates have no Vita-specific config and default to the host triple.
 # The bin crate (bsky-vita-app) is target-locked to Vita and excluded here.
