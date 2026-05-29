@@ -1,11 +1,17 @@
-# bsky-vita OAuth callback broker
+# bsky-vita OAuth Worker
 
-A stateless Cloudflare Worker that relays the OAuth `code` from the user's
-phone browser to the Vita. The Vita can't receive an OAuth redirect itself
-(no usable on-device browser; no native URI scheme), so this Worker exists
-to bridge that gap.
+A stateless Cloudflare Worker that hosts bsky-vita's OAuth surface — the
+client metadata, the consent callback, and the Vita-side pickup endpoint.
+Lives at `broker.davidlewis.xyz` by default.
 
-It does as little as possible. Two endpoints; one KV namespace; zero logs.
+The Vita can't receive an OAuth redirect itself (no usable on-device
+browser; no native URI scheme), so this Worker bridges the gap: the user
+consents on their phone, the AS redirects the phone to `/callback`, the
+Worker stores the code in KV under the random `state` nonce, and the Vita
+polls `/pop?state=…` until it picks up the code.
+
+Four routes; one KV namespace; zero logs. Also serves `/client_metadata.json`
+so the OAuth surface lives entirely behind this single Worker.
 
 ## What it sees, what it can do
 
@@ -73,10 +79,14 @@ npx wrangler kv namespace create STATE_KV
 npx wrangler deploy
 ```
 
-Wrangler prints the deployed URL (e.g.
-`https://bsky-vita-broker.<your-subdomain>.workers.dev`). That's the value
-to set as `BROKER_URL` in `crates/bsky-oauth/src/lib.rs` if you're building
-your own bsky-vita VPK.
+Wrangler prints the deployed URL. The default deployment uses a custom
+domain (`broker.davidlewis.xyz`) configured via the `routes` block in
+`wrangler.jsonc`; if you're self-hosting, either edit that block to point
+at a domain in your own Cloudflare account, or remove it and let wrangler
+fall back to a `*.workers.dev` URL. Either way, point `BROKER_ORIGIN` in
+`crates/bsky-oauth/src/lib.rs` at your deployed origin before building
+your VPK — that single constant drives `CLIENT_METADATA_URL`,
+`REDIRECT_URI_BROKER`, `REDIRECT_URI_QR`, and `BROKER_POP_URL`.
 
 ### Verifying it works
 
@@ -99,9 +109,9 @@ curl -i 'https://YOUR-URL/pop?state=test123'
 
 ### `GET /callback?state={state}&code={code}&iss={iss}`
 
-Called by the user's phone browser after the www.davidlewis.xyz/bsky-vita/
-callback page redirects to it. Writes `(state -> {code, iss})` to KV with
-a 300 s TTL. Returns the "Login received" HTML page.
+Called directly by the user's phone browser when the atproto authorization
+server redirects them after consent. Writes `(state -> {code, iss})` to KV
+with a 300 s TTL and returns the "Login received" HTML page.
 
 - `400` if any of `state`, `code`, `iss` is missing or unreasonably long.
 - `200` with HTML on success.

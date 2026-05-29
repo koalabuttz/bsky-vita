@@ -172,7 +172,7 @@ impl VitaOAuthClient {
 
         let client_metadata = AtprotoClientMetadata {
             client_id: CLIENT_METADATA_URL.to_string(),
-            client_uri: Some("https://www.davidlewis.xyz/bsky-vita/".to_string()),
+            client_uri: Some("https://broker.davidlewis.xyz/".to_string()),
             redirect_uris: vec![
                 REDIRECT_URI_BROKER.to_string(),
                 REDIRECT_URI_QR.to_string(),

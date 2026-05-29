@@ -37,35 +37,32 @@ pub use client::{
 };
 pub use session_store::{FileOAuthSessionStore, OAuthSessionStoreError};
 
+/// Origin of the Cloudflare Worker that hosts OAuth metadata + receives
+/// the callback + serves the /pop poll endpoint. Default deployment lives
+/// at the URL below; users who self-host the Worker (`broker/`) point this
+/// at their own custom domain before building their VPK.
+pub const BROKER_ORIGIN: &str = "https://broker.davidlewis.xyz";
+
 /// Hosted client_metadata.json URL. The atproto authorization server fetches
-/// this to learn our redirect URIs, scopes, etc. Changing this means
-/// re-deploying the hosted page (see `static-site/bsky-vita/client_metadata.json`).
-///
-/// Note `www.` — davidlewis.xyz redirects bare-host requests to `www.`, and
-/// the OAuth spec requires `client_id` URLs to NOT redirect (the AS fetches
-/// them and must hit a stable URL).
+/// this to learn our redirect URIs, scopes, etc. Served by the Worker
+/// itself (folded in from a separate static host so the OAuth surface is
+/// a single deployable). The `client_id` field in the metadata MUST equal
+/// this URL — the AS treats it as the canonical identifier.
 pub const CLIENT_METADATA_URL: &str =
-    "https://www.davidlewis.xyz/bsky-vita/client_metadata.json";
+    "https://broker.davidlewis.xyz/client_metadata.json";
 
 /// Broker pickup redirect URI. Declared in `client_metadata.json`.
-/// Must match exactly (byte-for-byte) per the OAuth spec. Trailing slash
-/// because davidlewis.xyz serves `/bsky-vita/callback/` as the directory
-/// path that hosts `callback/index.html` — bare-path requests 301 to the
-/// slash form, and redirects would break the spec-mandated literal match.
-pub const REDIRECT_URI_BROKER: &str =
-    "https://www.davidlewis.xyz/bsky-vita/callback/";
+/// Must match exactly (byte-for-byte) per the OAuth spec. No trailing
+/// slash because the Worker routes `/callback` exactly via its switch.
+pub const REDIRECT_URI_BROKER: &str = "https://broker.davidlewis.xyz/callback";
 
 /// QR-pickup redirect URI. v1.x; declared from v1 so adding QR later
 /// triggers no metadata churn or re-consent.
-pub const REDIRECT_URI_QR: &str =
-    "https://www.davidlewis.xyz/bsky-vita/callback-qr/";
+pub const REDIRECT_URI_QR: &str = "https://broker.davidlewis.xyz/callback-qr";
 
 /// Broker `/pop` endpoint. The Vita polls this with its own `state` value
-/// to retrieve the OAuth code once the user's phone has consented. Default
-/// deployment lives at the URL below; users can self-host the Worker
-/// (`broker/`) and override this constant before building their own VPK.
-pub const BROKER_POP_URL: &str =
-    "https://bsky-vita-broker.koalabuttz.workers.dev/pop";
+/// to retrieve the OAuth code once the user's phone has consented.
+pub const BROKER_POP_URL: &str = "https://broker.davidlewis.xyz/pop";
 
 /// Where the persisted OAuth session lives on the Vita. Separate from the
 /// app-password `session.json` so both auth paths can coexist.

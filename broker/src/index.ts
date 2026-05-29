@@ -1,10 +1,13 @@
-// bsky-vita OAuth callback broker.
+// bsky-vita OAuth Worker — hosts the client_metadata.json, receives the
+// OAuth callback directly from the authorization server, and serves the
+// /pop endpoint the Vita polls for the resulting code.
 //
-// Stateless relay that exists ONLY because the PS Vita has no usable browser
-// and so cannot receive the OAuth redirect from atproto's authorization
-// server directly. The user consents on their phone; the phone's browser is
-// redirected here; this Worker stores `(state -> {code, iss})` in KV under
-// a 5-minute TTL; the Vita polls and pops the value once.
+// Lives at https://broker.davidlewis.xyz/.
+//
+// The earlier two-host design (static `client_metadata.json` + callback
+// page on davidlewis.xyz, broker on a separate workers.dev URL) folded
+// into one Worker once we added the custom domain — eliminates one HTTP
+// hop in the OAuth flow and one deployment surface.
 //
 // Security model (why this is safe to host):
 //
@@ -34,14 +37,43 @@ interface Env {
 // linger. Cloudflare KV minimum TTL is 60 s; 300 is a comfortable middle.
 const ENTRY_TTL_SECONDS = 300;
 
+// Canonical Worker origin — referenced from CLIENT_METADATA + as the
+// redirect_uri the Vita advertises. Bound to broker.davidlewis.xyz via the
+// `routes` block in wrangler.jsonc; the *.workers.dev URL still resolves
+// (wrangler keeps it on by default) but isn't used for OAuth.
+const ORIGIN = "https://broker.davidlewis.xyz";
+
 // Security headers applied to every HTML response.
 const HTML_SECURITY_HEADERS = {
   "X-Content-Type-Options": "nosniff",
   "X-Frame-Options": "DENY",
   "Referrer-Policy": "no-referrer",
-  // Prevent search engines from indexing the success / info page (no useful
-  // content anyway, but defensive).
+  // Prevent search engines from indexing the success / info / metadata
+  // surfaces (no useful crawl content anyway, but defensive).
   "X-Robots-Tag": "noindex, nofollow",
+} as const;
+
+// The OAuth client metadata document. Served as JSON at /client_metadata.json
+// and used by the atproto authorization server to learn redirect URIs,
+// scopes, etc. `client_id` MUST equal the URL this document is served at —
+// the AS fetches client_id and treats it as the canonical identifier.
+const CLIENT_METADATA = {
+  client_id: `${ORIGIN}/client_metadata.json`,
+  client_name: "bsky-vita",
+  client_uri: `${ORIGIN}/`,
+  redirect_uris: [
+    `${ORIGIN}/callback`,
+    // v1.x QR-pickup path (currently a stub page; real QR-render in v1.x).
+    // Declared from v1 so adding camera-scan pickup later triggers no
+    // metadata churn / re-consent.
+    `${ORIGIN}/callback-qr`,
+  ],
+  scope: "atproto transition:generic transition:chat.bsky",
+  grant_types: ["authorization_code", "refresh_token"],
+  response_types: ["code"],
+  application_type: "native",
+  token_endpoint_auth_method: "none",
+  dpop_bound_access_tokens: true,
 } as const;
 
 export default {
@@ -54,8 +86,12 @@ export default {
     }
 
     switch (url.pathname) {
+      case "/client_metadata.json":
+        return handleClientMetadata();
       case "/callback":
         return handleCallback(url, env);
+      case "/callback-qr":
+        return handleCallbackQr();
       case "/pop":
         return handlePop(url, env);
       case "/":
@@ -65,6 +101,21 @@ export default {
     }
   },
 } satisfies ExportedHandler<Env>;
+
+// Returns the OAuth client metadata document. Cached for an hour on the
+// edge — `client_id` is a stable URL the AS fetches once per token issuance,
+// and the document itself changes only on deploy.
+function handleClientMetadata(): Response {
+  return new Response(JSON.stringify(CLIENT_METADATA, null, 2) + "\n", {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "public, max-age=3600",
+      // No security headers tying it to a single origin — this resource
+      // is meant to be fetched by atproto AS servers, not browsers.
+    },
+  });
+}
 
 // Phone-browser entry point. Called once per login, by the user's phone
 // browser, immediately after they consent at the authorization server.
@@ -97,6 +148,17 @@ async function handleCallback(url: URL, env: Env): Promise<Response> {
   await env.STATE_KV.put(state, payload, { expirationTtl: ENTRY_TTL_SECONDS });
 
   return new Response(SUCCESS_HTML, {
+    status: 200,
+    headers: { "Content-Type": "text/html; charset=utf-8", ...HTML_SECURITY_HEADERS },
+  });
+}
+
+// v1.x stub. When camera-scan pickup ships, this endpoint will render the
+// (code, state, iss) as a QR code for the Vita's rear camera to scan
+// directly — completely bypassing the broker KV path. Today it just tells
+// the user the path isn't live yet.
+function handleCallbackQr(): Response {
+  return new Response(CALLBACK_QR_STUB_HTML, {
     status: 200,
     headers: { "Content-Type": "text/html; charset=utf-8", ...HTML_SECURITY_HEADERS },
   });
@@ -142,10 +204,10 @@ function handleRoot(): Response {
   });
 }
 
-const SUCCESS_HTML = `<!DOCTYPE html>
+const SUCCESS_HTML = `<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
+  <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Login received - bsky-vita</title>
   <style>
@@ -167,10 +229,36 @@ const SUCCESS_HTML = `<!DOCTYPE html>
 </body>
 </html>`;
 
-const INFO_HTML = `<!DOCTYPE html>
+const CALLBACK_QR_STUB_HTML = `<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>bsky-vita - QR pickup not yet available</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #15171a; color: #e4e6eb; margin: 0; padding: 0;
+      min-height: 100vh; display: grid; place-items: center; text-align: center; }
+    main { max-width: 32rem; padding: 2rem; }
+    h1 { font-size: 1.5rem; margin: 0 0 0.5rem; color: #f5a623; }
+    p { font-size: 1rem; line-height: 1.5; margin: 0.75rem 0; color: #c2c6ca; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>QR pickup ships in v1.x</h1>
+    <p>You arrived here because your bsky-vita app requested the camera-scan
+      OAuth pickup mode, which isn't shipping until v1.x.</p>
+    <p>For now, please return to your Vita and choose the default
+      &ldquo;broker pickup&rdquo; sign-in path.</p>
+  </main>
+</body>
+</html>`;
+
+const INFO_HTML = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>bsky-vita OAuth broker</title>
   <style>
@@ -186,12 +274,23 @@ const INFO_HTML = `<!DOCTYPE html>
 </head>
 <body>
   <h1>bsky-vita OAuth broker</h1>
-  <p>This Worker is a tiny stateless relay used by
-    <a href="https://github.com/koalabuttz/bsky-vita">bsky-vita</a>
-    (a homebrew Bluesky client for the PlayStation Vita) to receive OAuth
-    authorization codes from the user's phone after consent.</p>
-  <p>It exposes exactly two endpoints, <code>/callback</code> (write) and
-    <code>/pop</code> (read-once, delete). Entries auto-expire after 5 minutes.</p>
+  <p>This Worker is the OAuth surface used by
+    <a href="https://github.com/koalabuttz/bsky-vita">bsky-vita</a>,
+    a homebrew Bluesky client for the PlayStation Vita. It serves the
+    client metadata, receives the consent-flow redirect from the
+    authorization server, and exposes a single-read pickup endpoint the
+    Vita polls.</p>
+  <p>Endpoints:</p>
+  <ul style="color:#c2c6ca">
+    <li><code>/client_metadata.json</code> &mdash; OAuth client metadata
+      (atproto AS fetches this).</li>
+    <li><code>/callback</code> &mdash; receives <code>(code, state, iss)</code>
+      from the AS, writes <code>(state &rarr; {code, iss})</code> to KV with a
+      5-minute TTL, returns "Login received" to the user.</li>
+    <li><code>/pop?state=&hellip;</code> &mdash; the Vita reads this once and
+      the entry is deleted.</li>
+    <li><code>/callback-qr</code> &mdash; v1.x QR-pickup stub.</li>
+  </ul>
   <p>It logs nothing &mdash; <code>observability.enabled</code> is false in
     <code>wrangler.jsonc</code> and the source contains zero
     <code>console.log</code> calls on request data. The authorization codes

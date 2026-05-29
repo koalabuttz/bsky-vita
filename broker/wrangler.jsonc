@@ -14,6 +14,22 @@
     }
   ],
 
+  // Custom domain. Wrangler will create the DNS record + bind the Worker on
+  // the first `wrangler deploy`, as long as the davidlewis.xyz zone is in
+  // this Cloudflare account (it is — the website's also on CF). The
+  // *.workers.dev URL still resolves but isn't used by the OAuth flow.
+  //
+  // `client_id` URLs are NOT allowed to redirect under the OAuth spec, and
+  // moving everything onto a single host (instead of splitting metadata
+  // on davidlewis.xyz and the broker endpoint elsewhere) eliminates one
+  // HTTP hop and one deployment surface.
+  "routes": [
+    {
+      "pattern": "broker.davidlewis.xyz",
+      "custom_domain": true
+    }
+  ],
+
   // Zero-log: we never want to retain ANY request data. Workers Logs
   // (head-sampled application logs + request metadata) are opt-in via this
   // flag; setting it to false ensures we don't accumulate any of: source IPs,
