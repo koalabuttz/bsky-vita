@@ -23,6 +23,9 @@ vita-newlib-shims = { workspace = true }
 bsky-log    = { path = "../crates/bsky-log" }
 bsky-net    = { path = "../crates/bsky-net" }
 bsky-auth   = { path = "../crates/bsky-auth" }
+# Phase 11: OAuth path (alongside app password). Imported here so main.rs
+# can reference OAUTH_SESSION_PATH during logout teardown.
+bsky-oauth  = { path = "../crates/bsky-oauth" }
 bsky-models = { path = "../crates/bsky-models" }
 atrium-api  = { workspace = true }
 serde_json  = { workspace = true }

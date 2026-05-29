@@ -211,6 +211,21 @@ fn main() {
                 screen_stack.clear();
                 screen_stack.push(next);
             }
+            ScreenAction::Logout => {
+                // Drop the worker (closes its channel → the thread exits and
+                // its AuthClient clone, holding the tokens, is freed) and our
+                // own client handle BEFORE deleting the session files, so a
+                // worker mid-refresh can't re-persist them after deletion.
+                worker = None;
+                auth_client = None;
+                // Clear both auth-path session files so the post-logout login
+                // form sees no resumable session regardless of which path
+                // produced this session.
+                let _ = std::fs::remove_file(bsky_auth::SESSION_PATH);
+                let _ = std::fs::remove_file(bsky_oauth::OAUTH_SESSION_PATH);
+                screen_stack.clear();
+                screen_stack.push(Box::new(LoginScreen::idle()));
+            }
         }
     }
 }

@@ -1,0 +1,15 @@
+{
+  "client_id": "https://www.davidlewis.xyz/bsky-vita/client_metadata.json",
+  "client_name": "bsky-vita",
+  "client_uri": "https://www.davidlewis.xyz/bsky-vita/",
+  "redirect_uris": [
+    "https://www.davidlewis.xyz/bsky-vita/callback/",
+    "https://www.davidlewis.xyz/bsky-vita/callback-qr/"
+  ],
+  "scope": "atproto transition:generic transition:chat.bsky",
+  "grant_types": ["authorization_code", "refresh_token"],
+  "response_types": ["code"],
+  "application_type": "native",
+  "token_endpoint_auth_method": "none",
+  "dpop_bound_access_tokens": true
+}

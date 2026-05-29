@@ -73,7 +73,7 @@ use atrium_api::types::string::{AtIdentifier, Datetime, Did, Nsid, RecordKey};
 use atrium_api::types::{LimitedNonZeroU8, LimitedU16, Union, Unknown};
 use atrium_xrpc::http::Request;
 use atrium_xrpc::HttpClient;
-use bsky_auth::AuthClient;
+use bsky_auth::{agent_call, AuthClient};
 use bsky_net::VitaHttpClient;
 use crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError};
 use futures::executor::block_on;
@@ -578,7 +578,7 @@ fn handle_request(client: &AuthClient, req: WorkRequest) -> WorkResponse {
             // Resolve actor: None ⇒ session's own DID; Some(s) ⇒ use directly.
             let actor_str = match actor {
                 Some(a) => a,
-                None => match block_on(client.agent.did()) {
+                None => match agent_call!(client, |a| a.did()) {
                     Some(d) => d.to_string(),
                     None => {
                         return WorkResponse::Profile(Err(
@@ -595,7 +595,7 @@ fn handle_request(client: &AuthClient, req: WorkRequest) -> WorkResponse {
                     )));
                 }
             };
-            let result = block_on(client.agent.api.app.bsky.actor.get_profile(
+            let result = agent_call!(client, |a| a.api.app.bsky.actor.get_profile(
                 get_profile::ParametersData { actor: at_id }.into(),
             ));
             match result {
@@ -662,7 +662,7 @@ fn handle_request(client: &AuthClient, req: WorkRequest) -> WorkResponse {
             // Fire-and-forget; the result is logged but not surfaced.
             let input = update_seen::InputData { seen_at }.into();
             if let Err(e) =
-                block_on(client.agent.api.app.bsky.notification.update_seen(input))
+                agent_call!(client, |a| a.api.app.bsky.notification.update_seen(input))
             {
                 bsky_log::log!("update_seen failed: {e}");
             }
@@ -700,7 +700,7 @@ fn search_actors_handler(
         term: None,
     }
     .into();
-    match block_on(client.agent.api.app.bsky.actor.search_actors(params)) {
+    match agent_call!(client, |a| a.api.app.bsky.actor.search_actors(params)) {
         Ok(o) => WorkResponse::SearchActors(Ok(ActorsBatch {
             actors: o.data.actors,
             cursor: o.data.cursor,
@@ -730,7 +730,7 @@ fn search_posts_handler(
         url: None,
     }
     .into();
-    match block_on(client.agent.api.app.bsky.feed.search_posts(params)) {
+    match agent_call!(client, |a| a.api.app.bsky.feed.search_posts(params)) {
         Ok(o) => WorkResponse::SearchPosts(Ok(PostsBatch {
             posts: o.data.posts,
             cursor: o.data.cursor,
@@ -756,7 +756,7 @@ fn fetch_feed_page(
                 algorithm: None,
             }
             .into();
-            match block_on(client.agent.api.app.bsky.feed.get_timeline(params)) {
+            match agent_call!(client, |a| a.api.app.bsky.feed.get_timeline(params)) {
                 Ok(o) => WorkResponse::FeedPage {
                     source,
                     batch: Ok(TimelineBatch {
@@ -777,7 +777,7 @@ fn fetch_feed_page(
                 limit: Some(limit),
             }
             .into();
-            match block_on(client.agent.api.app.bsky.feed.get_feed(params)) {
+            match agent_call!(client, |a| a.api.app.bsky.feed.get_feed(params)) {
                 Ok(o) => WorkResponse::FeedPage {
                     source,
                     batch: Ok(TimelineBatch {
@@ -821,7 +821,7 @@ fn fetch_feed_page(
                 limit: Some(limit),
             }
             .into();
-            match block_on(client.agent.api.app.bsky.feed.get_author_feed(params)) {
+            match agent_call!(client, |a| a.api.app.bsky.feed.get_author_feed(params)) {
                 Ok(o) => WorkResponse::FeedPage {
                     source,
                     batch: Ok(TimelineBatch {
@@ -852,7 +852,7 @@ fn fetch_feed_page(
                 limit: Some(limit),
             }
             .into();
-            match block_on(client.agent.api.app.bsky.feed.get_actor_likes(params)) {
+            match agent_call!(client, |a| a.api.app.bsky.feed.get_actor_likes(params)) {
                 Ok(o) => WorkResponse::FeedPage {
                     source,
                     batch: Ok(TimelineBatch {
@@ -893,7 +893,7 @@ fn fetch_actor_feeds(
         limit: Some(limit),
     }
     .into();
-    match block_on(client.agent.api.app.bsky.feed.get_actor_feeds(params)) {
+    match agent_call!(client, |a| a.api.app.bsky.feed.get_actor_feeds(params)) {
         Ok(o) => WorkResponse::ActorFeeds {
             actor,
             batch: Ok(ActorFeedsBatch {
@@ -932,7 +932,7 @@ fn fetch_actor_lists(
         purposes: None,
     }
     .into();
-    match block_on(client.agent.api.app.bsky.graph.get_lists(params)) {
+    match agent_call!(client, |a| a.api.app.bsky.graph.get_lists(params)) {
         Ok(o) => WorkResponse::ActorLists {
             actor,
             batch: Ok(ActorListsBatch {
@@ -970,7 +970,7 @@ fn fetch_actor_starter_packs(
         limit: Some(limit),
     }
     .into();
-    match block_on(client.agent.api.app.bsky.graph.get_actor_starter_packs(params)) {
+    match agent_call!(client, |a| a.api.app.bsky.graph.get_actor_starter_packs(params)) {
         Ok(o) => WorkResponse::ActorStarterPacks {
             actor,
             batch: Ok(ActorStarterPacksBatch {
@@ -991,7 +991,7 @@ fn fetch_actor_starter_packs(
 fn fetch_saved_feeds(client: &AuthClient) -> WorkResponse {
     // 1. Read prefs.
     let params = get_preferences::ParametersData {}.into();
-    let prefs = match block_on(client.agent.api.app.bsky.actor.get_preferences(params)) {
+    let prefs = match agent_call!(client, |a| a.api.app.bsky.actor.get_preferences(params)) {
         Ok(o) => o.data.preferences,
         Err(e) => return WorkResponse::SavedFeeds(Err(format!("{e}"))),
     };
@@ -1061,7 +1061,7 @@ fn fetch_saved_feeds(client: &AuthClient) -> WorkResponse {
         std::collections::HashMap::new();
     if !feed_uris.is_empty() {
         let params = get_feed_generators::ParametersData { feeds: feed_uris }.into();
-        match block_on(client.agent.api.app.bsky.feed.get_feed_generators(params)) {
+        match agent_call!(client, |a| a.api.app.bsky.feed.get_feed_generators(params)) {
             Ok(o) => {
                 for view in o.data.feeds.iter() {
                     hydrated.insert(
@@ -1117,15 +1117,13 @@ fn fetch_notifications(client: &AuthClient, cursor: Option<String>) -> WorkRespo
         seen_at: None,
     }
     .into();
-    match block_on(
-        client
-            .agent
+    match agent_call!(client, |a| a
             .api
             .app
             .bsky
             .notification
-            .list_notifications(params),
-    ) {
+            .list_notifications(params))
+    {
         Ok(o) => WorkResponse::Notifications(Ok(NotificationBatch {
             notifications: o.data.notifications,
             cursor: o.data.cursor,
@@ -1191,15 +1189,13 @@ fn fetch_convos(client: &AuthClient, cursor: Option<String>) -> WorkResponse {
         status: None,
     }
     .into();
-    match block_on(
-        client
-            .agent
+    match agent_call!(client, |a| a
             .api_with_proxy(chat_did(), AtprotoServiceType::BskyChat)
             .chat
             .bsky
             .convo
-            .list_convos(params),
-    ) {
+            .list_convos(params))
+    {
         Ok(o) => WorkResponse::Convos(Ok(ConvosBatch {
             convos: o.data.convos,
             cursor: o.data.cursor,
@@ -1225,15 +1221,13 @@ fn fetch_convo_messages(
         limit: Some(limit),
     }
     .into();
-    match block_on(
-        client
-            .agent
+    match agent_call!(client, |a| a
             .api_with_proxy(chat_did(), AtprotoServiceType::BskyChat)
             .chat
             .bsky
             .convo
-            .get_messages(params),
-    ) {
+            .get_messages(params))
+    {
         Ok(o) => {
             let mut messages: Vec<MessageItem> = o
                 .data
@@ -1271,15 +1265,13 @@ fn send_chat_message(client: &AuthClient, convo_id: String, text: String) -> Wor
         message,
     }
     .into();
-    match block_on(
-        client
-            .agent
+    match agent_call!(client, |a| a
             .api_with_proxy(chat_did(), AtprotoServiceType::BskyChat)
             .chat
             .bsky
             .convo
-            .send_message(input),
-    ) {
+            .send_message(input))
+    {
         Ok(view) => WorkResponse::MessageSent {
             convo_id,
             result: Ok(view),
@@ -1299,15 +1291,13 @@ fn mark_convo_read(client: &AuthClient, convo_id: String) -> WorkResponse {
         message_id: None,
     }
     .into();
-    match block_on(
-        client
-            .agent
+    match agent_call!(client, |a| a
             .api_with_proxy(chat_did(), AtprotoServiceType::BskyChat)
             .chat
             .bsky
             .convo
-            .update_read(input),
-    ) {
+            .update_read(input))
+    {
         Ok(_) => WorkResponse::ConvoRead(Ok(())),
         Err(e) => WorkResponse::ConvoRead(Err(map_chat_err(e))),
     }
@@ -1325,15 +1315,13 @@ fn fetch_convo_for_members(client: &AuthClient, members: Vec<String>) -> WorkRes
         Err(e) => return WorkResponse::ConvoForMembers(Err(e)),
     };
     let params = get_convo_for_members::ParametersData { members }.into();
-    match block_on(
-        client
-            .agent
+    match agent_call!(client, |a| a
             .api_with_proxy(chat_did(), AtprotoServiceType::BskyChat)
             .chat
             .bsky
             .convo
-            .get_convo_for_members(params),
-    ) {
+            .get_convo_for_members(params))
+    {
         Ok(o) => WorkResponse::ConvoForMembers(Ok(o.data.convo)),
         Err(e) => WorkResponse::ConvoForMembers(Err(map_chat_err(e))),
     }
@@ -1341,7 +1329,7 @@ fn fetch_convo_for_members(client: &AuthClient, members: Vec<String>) -> WorkRes
 
 /// Create an `app.bsky.graph.follow` record targeting `actor_did`.
 fn create_follow(client: &AuthClient, actor_did: String) -> WorkResponse {
-    let did_str = match block_on(client.agent.did()) {
+    let did_str = match agent_call!(client, |a| a.did()) {
         Some(d) => d.to_string(),
         None => return WorkResponse::FollowChanged(Err("no session DID".into())),
     };
@@ -1382,14 +1370,14 @@ fn create_follow(client: &AuthClient, actor_did: String) -> WorkResponse {
         swap_commit: None,
         validate: None,
     };
-    match block_on(client.agent.api.com.atproto.repo.create_record(input.into())) {
+    match agent_call!(client, |a| a.api.com.atproto.repo.create_record(input.into())) {
         Ok(o) => WorkResponse::FollowChanged(Ok(Some(o.data.uri))),
         Err(e) => WorkResponse::FollowChanged(Err(format!("{e}"))),
     }
 }
 
 fn delete_follow(client: &AuthClient, rkey_str: &str) -> WorkResponse {
-    let did_str = match block_on(client.agent.did()) {
+    let did_str = match agent_call!(client, |a| a.did()) {
         Some(d) => d.to_string(),
         None => return WorkResponse::FollowChanged(Err("no session DID".into())),
     };
@@ -1412,7 +1400,7 @@ fn delete_follow(client: &AuthClient, rkey_str: &str) -> WorkResponse {
         swap_commit: None,
         swap_record: None,
     };
-    match block_on(client.agent.api.com.atproto.repo.delete_record(input.into())) {
+    match agent_call!(client, |a| a.api.com.atproto.repo.delete_record(input.into())) {
         Ok(_) => WorkResponse::FollowChanged(Ok(None)),
         Err(e) => WorkResponse::FollowChanged(Err(format!("{e}"))),
     }
@@ -1426,7 +1414,7 @@ fn fetch_thread(client: &AuthClient, uri: String) -> WorkResponse {
         uri,
     }
     .into();
-    match block_on(client.agent.api.app.bsky.feed.get_post_thread(params)) {
+    match agent_call!(client, |a| a.api.app.bsky.feed.get_post_thread(params)) {
         Ok(o) => match o.data.thread {
             Union::Refs(OutputThreadRefs::AppBskyFeedDefsThreadViewPost(view)) => {
                 let main = view.post.clone();
@@ -1494,7 +1482,7 @@ fn create_engagement_record(
     use atrium_api::com::atproto::repo::strong_ref::MainData as StrongRefData;
     use atrium_api::types::string::Cid;
 
-    let did_str = match block_on(client.agent.did()) {
+    let did_str = match agent_call!(client, |a| a.did()) {
         Some(d) => d.to_string(),
         None => return wrap_engagement_err(is_like, "no session DID".into()),
     };
@@ -1555,7 +1543,7 @@ fn create_engagement_record(
         swap_commit: None,
         validate: None,
     };
-    match block_on(client.agent.api.com.atproto.repo.create_record(input.into())) {
+    match agent_call!(client, |a| a.api.com.atproto.repo.create_record(input.into())) {
         Ok(o) => wrap_engagement_ok(is_like, Some(o.data.uri)),
         Err(e) => wrap_engagement_err(is_like, format!("{e}")),
     }
@@ -1568,7 +1556,7 @@ fn delete_engagement_record(
     rkey_str: &str,
     is_like: bool,
 ) -> WorkResponse {
-    let did_str = match block_on(client.agent.did()) {
+    let did_str = match agent_call!(client, |a| a.did()) {
         Some(d) => d.to_string(),
         None => return wrap_engagement_err(is_like, "no session DID".into()),
     };
@@ -1591,7 +1579,7 @@ fn delete_engagement_record(
         swap_commit: None,
         swap_record: None,
     };
-    match block_on(client.agent.api.com.atproto.repo.delete_record(input.into())) {
+    match agent_call!(client, |a| a.api.com.atproto.repo.delete_record(input.into())) {
         Ok(_) => wrap_engagement_ok(is_like, None),
         Err(e) => wrap_engagement_err(is_like, format!("{e}")),
     }
@@ -1654,7 +1642,7 @@ fn create_one_post(
 
         let mut items = Vec::with_capacity(images.len());
         for img in images {
-            let blob = block_on(client.agent.api.com.atproto.repo.upload_blob(img.bytes))
+            let blob = agent_call!(client, |a| a.api.com.atproto.repo.upload_blob(img.bytes))
                 .map_err(|e| format!("uploadBlob: {e}"))?
                 .data
                 .blob;
@@ -1707,7 +1695,7 @@ fn create_one_post(
         swap_commit: None,
         validate: None,
     };
-    let o = block_on(client.agent.api.com.atproto.repo.create_record(input.into()))
+    let o = agent_call!(client, |a| a.api.com.atproto.repo.create_record(input.into()))
         .map_err(|e| format!("{e}"))?;
     Ok((o.data.uri, o.data.cid))
 }
@@ -1725,7 +1713,7 @@ fn create_thread(
     if segments.is_empty() {
         return WorkResponse::PostCreated(Err("empty thread".into()));
     }
-    let did_str = match block_on(client.agent.did()) {
+    let did_str = match agent_call!(client, |a| a.did()) {
         Some(d) => d.to_string(),
         None => return WorkResponse::PostCreated(Err("not logged in".into())),
     };

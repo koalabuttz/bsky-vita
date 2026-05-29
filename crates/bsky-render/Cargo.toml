@@ -11,6 +11,10 @@ build = "build.rs"
 # still builds without VITASDK present.
 [dependencies]
 bsky-log = { path = "../bsky-log" }
+# Phase 11.5: pure-Rust QR encoder. default-features=false drops the
+# `image` + `svg` + `pic` features we don't need (we render to a flat
+# RGBA buffer via `to_vec()` directly).
+qrcode = { workspace = true }
 
 [target.'cfg(target_os = "vita")'.dependencies]
 vitasdk-sys = { workspace = true }

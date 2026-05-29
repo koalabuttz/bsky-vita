@@ -90,4 +90,7 @@ pub enum ScreenAction {
         client: Arc<AuthClient>,
         next: Box<dyn Screen>,
     },
+    /// Log out: main.rs tears down the worker + auth client, deletes the
+    /// on-disk session, and resets the stack to a fresh `LoginScreen`.
+    Logout,
 }

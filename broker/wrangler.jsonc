@@ -1,0 +1,27 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "bsky-vita-broker",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-05-28",
+
+  // KV namespace for state→code mapping. ~5-min TTL per entry, single-read.
+  // Create with: `wrangler kv namespace create STATE_KV`
+  // Then paste the returned ID below.
+  "kv_namespaces": [
+    {
+      "binding": "STATE_KV",
+      "id": "4c3bddeed4274626ab6b09e521512ede"
+    }
+  ],
+
+  // Zero-log: we never want to retain ANY request data. Workers Logs
+  // (head-sampled application logs + request metadata) are opt-in via this
+  // flag; setting it to false ensures we don't accumulate any of: source IPs,
+  // URLs, query strings, headers, or `console.log()` output.
+  //
+  // Source-code review confirms we also never call console.log/error on
+  // request data ourselves — see src/index.ts.
+  "observability": {
+    "enabled": false
+  }
+}

@@ -8,9 +8,13 @@
 //!   re-resolves the user's PDS and calls `resume_session` to refresh the
 //!   token pair.
 //!
-//! Both end with the same shape: a configured [`atrium_api::agent::atp_agent::AtpAgent`]
-//! plus the resolved DID + PDS URL, ready for any subsequent
-//! `agent.api.app.bsky.*` call.
+//! Phase 11 adds a second constructor path in `bsky-oauth` that produces
+//! an OAuth-backed [`AuthAgent::OAuth`] instead. The downstream worker
+//! reaches into the agent via the [`crate::agent_call`] macro so both
+//! backends look identical to callers — the typed lexicon methods
+//! (e.g. `app.bsky.feed.get_timeline`) return the same concrete
+//! `Result<T, atrium_xrpc::Error<E>>` shape regardless of which transport
+//! implements `XrpcClient` underneath.
 
 use std::sync::Arc;
 
@@ -23,10 +27,20 @@ use crate::store::FileSessionStore;
 use crate::xrpc::PdsClient;
 use crate::{AuthError, SESSION_PATH};
 
+/// Which auth backend produced this client. App-password and OAuth produce
+/// different concrete types but expose the same surface via atrium-api's
+/// `Agent` (AtpAgent already derefs to `Agent`; OAuth wraps `OAuthSession`
+/// in `Agent::new`). Callers in `bsky-worker` dispatch with the
+/// [`crate::agent_call`] macro.
+pub enum AuthAgent {
+    Password(AtpAgent<FileSessionStore, PdsClient>),
+    OAuth(bsky_oauth::OAuthAgent),
+}
+
 /// Concrete agent + identity bundle that flows from LoginScreen into
 /// ProfileScreen (and any later authenticated screen).
 pub struct AuthClient {
-    pub agent: AtpAgent<FileSessionStore, PdsClient>,
+    pub agent: AuthAgent,
     pub resolved: ResolvedIdentity,
 }
 
@@ -52,7 +66,7 @@ pub fn login_with_password(handle: &str, app_password: &str) -> Result<AuthClien
     block_on(agent.login(handle, app_password))
         .map_err(|e| AuthError::Login(format!("{e}")))?;
 
-    Ok(AuthClient { agent, resolved })
+    Ok(AuthClient { agent: AuthAgent::Password(agent), resolved })
 }
 
 /// If `session.json` exists, build an agent and call `resume_session`
@@ -92,7 +106,7 @@ pub fn try_resume_existing_session() -> Result<Option<AuthClient>, AuthError> {
     let agent = AtpAgent::new(pds_client, store);
 
     match block_on(agent.resume_session(session)) {
-        Ok(()) => Ok(Some(AuthClient { agent, resolved })),
+        Ok(()) => Ok(Some(AuthClient { agent: AuthAgent::Password(agent), resolved })),
         Err(e) => {
             // Refresh failed (or getSession bounced). Treat as no session;
             // the caller will route to LoginScreen. We deliberately don't

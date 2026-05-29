@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["app", "crates/*"]
+exclude = ["broker", "static-site"]
 
 [workspace.package]
 version = "0.1.0"
@@ -36,7 +37,15 @@ atrium-api      = { version = "0.25", default-features = false, features = ["age
 # types are in the base (no namespace-comatproto feature exists).
 atrium-xrpc     = "0.12"
 atrium-identity = { version = "0.1", default-features = false }
+# Phase 11: AT Protocol OAuth client (PAR+PKCE+DPoP). default-features=false
+# drops the `default-client` (reqwest) — we plug in our VitaHttpClient via
+# `OAuthClientConfig.http_client`. tokio dep is `features = ["sync"]` only
+# (same as atrium-api), so no runtime needed; driven via futures::executor.
+atrium-oauth    = { version = "0.1", default-features = false }
 futures         = { version = "0.3", default-features = false, features = ["executor"] }
+# Phase 11: pure-Rust QR encoder. We render an authorize URL to a QR matrix
+# on the Vita and upload it as an RGBA texture (no FFI, no image IO).
+qrcode          = { version = "0.14", default-features = false }
 toml            = { version = "0.8", default-features = false, features = ["parse"] }
 
 [patch.crates-io]

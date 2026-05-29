@@ -12,6 +12,7 @@
 //! No logout / no refresh actions in 3.1 — Phase 3+ polish.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use atrium_api::app::bsky::actor::defs::ProfileViewDetailedData;
 use atrium_api::app::bsky::feed::defs::{FeedViewPost, FeedViewPostReasonRefs, GeneratorView};
@@ -201,6 +202,11 @@ pub struct ProfileScreen {
     /// the next `frame()` as a `Push` (navigation can't happen inside
     /// `handle_worker_response`).
     pending_open_convo: Option<ConvoView>,
+    /// Tap state for the own-profile "Log out" button.
+    logout_btn: ButtonState,
+    /// When `Some`, the Log out button is "armed" (awaiting a confirming
+    /// second tap). Auto-disarms after a few seconds.
+    logout_armed_at: Option<Instant>,
     /// Active sub-tab. Default `Posts`.
     active_tab: ProfileTab,
     /// Tap state for each pill in the sub-tab strip (parallel to
@@ -255,6 +261,8 @@ impl ProfileScreen {
             messaging: false,
             dm_error: None,
             pending_open_convo: None,
+            logout_btn: ButtonState::default(),
+            logout_armed_at: None,
             active_tab: ProfileTab::Posts,
             tab_pill_btns: Default::default(),
             scroll_y: 0.0,
@@ -936,6 +944,8 @@ impl Screen for ProfileScreen {
         // clicked (so the dispatch happens after the `self.state` borrow
         // ends below).
         let mut open_dm_did: Option<String> = None;
+        // Set when the (own-profile) Log out button's confirming tap fires.
+        let mut logout_clicked = false;
         match &self.state {
             ProfileState::Pending => {
                 frame.draw_text_centered(
@@ -984,6 +994,46 @@ impl Screen for ProfileScreen {
                     // The DM-open error is drawn as a bottom toast at the
                     // end of frame() (the action band here is too cramped —
                     // the sub-tab pill strip at y=374 would cover it).
+                } else {
+                    // Own profile: Log out button in the same action band.
+                    // Two-tap confirm (armed for ~3s) so an accidental tap
+                    // can't sign the user out (re-entering an app password
+                    // on the IME is painful). Drawn inline rather than via
+                    // `widget::button` so the armed state can go red.
+                    let armed = self
+                        .logout_armed_at
+                        .map(|t| t.elapsed() < Duration::from_secs(3))
+                        .unwrap_or(false);
+                    let btn_w = 160.0;
+                    let rect = Rect::new(
+                        (SCREEN_WIDTH as f32 - btn_w) / 2.0,
+                        340.0 + y_offset as f32,
+                        btn_w,
+                        30.0,
+                    );
+                    let (label, color) = if armed {
+                        ("Confirm log out?", theme::ERROR)
+                    } else {
+                        ("Log out", theme::ACCENT)
+                    };
+                    let pressed_now = ctx.touches.iter().any(|t| rect.contains(t.x, t.y));
+                    let clicked = self.logout_btn.pressed_last
+                        && !pressed_now
+                        && ctx.touches.is_empty();
+                    self.logout_btn.pressed_last = pressed_now;
+                    frame.fill_rect(rect.x, rect.y, rect.w, rect.h, color);
+                    let scale = 1.1;
+                    let (tw, th) = frame.measure_text(font, scale, label);
+                    let tx = rect.x as i32 + (rect.w as i32 - tw) / 2;
+                    let ty = rect.y as i32 + (rect.h as i32 + th) / 2 - 4;
+                    frame.draw_text(font, tx, ty, theme::TEXT_PRIMARY, scale, label);
+                    if clicked {
+                        if armed {
+                            logout_clicked = true;
+                        } else {
+                            self.logout_armed_at = Some(Instant::now());
+                        }
+                    }
                 }
             }
             ProfileState::Error(msg) => {
@@ -1023,6 +1073,11 @@ impl Screen for ProfileScreen {
                     });
                 }
             }
+        }
+
+        // Log out: confirming tap fired — main.rs tears down the session.
+        if logout_clicked {
+            return ScreenAction::Logout;
         }
 
         // ─── Tab content + sub-tab pill strip ───────────────────────

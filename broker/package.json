@@ -1,0 +1,17 @@
+{
+  "name": "bsky-vita-broker",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Stateless OAuth callback relay for bsky-vita. Zero-log; opaque key/value relay only. See ../crates/bsky-oauth/ for the client side.",
+  "license": "GPL-3.0-or-later",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "types": "wrangler types"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260528.0",
+    "typescript": "^5",
+    "wrangler": "^4"
+  }
+}

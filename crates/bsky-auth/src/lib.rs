@@ -28,11 +28,48 @@ pub mod resolver;
 pub mod store;
 pub mod xrpc;
 
-pub use client::{login_with_password, try_resume_existing_session, AuthClient};
+pub use client::{login_with_password, try_resume_existing_session, AuthAgent, AuthClient};
 pub use credentials::{load_credentials, Credentials};
 pub use resolver::{resolve_pds, ResolvedIdentity};
 pub use store::{FileSessionStore, SessionStoreError};
 pub use xrpc::PdsClient;
+
+/// Dispatch a future-producing expression over [`AuthAgent`]'s variants
+/// and drive it to completion with `block_on`. The closure body is evaluated
+/// identically in both arms — atrium-api's typed lexicon methods (e.g.
+/// `agent.api.app.bsky.feed.get_timeline(...)`) return the same concrete
+/// type regardless of which `XrpcClient` implementation backs the agent.
+///
+/// `block_on` runs *inside* the match arm so temporary `Service` values
+/// (e.g. `agent.api_with_proxy(...)`) live long enough for the awaited
+/// future to complete — the arm-scope temp lifetime ends *after* the
+/// awaited result is produced.
+///
+/// `AtpAgent` derefs to `atrium_api::agent::Agent`, and `bsky-oauth` wraps
+/// `OAuthSession` directly in `Agent::new` — both expose `.api`, `.did()`,
+/// and `.api_with_proxy(...)`, so the same expression resolves cleanly.
+///
+/// # Example
+/// ```ignore
+/// let timeline = agent_call!(client, |agent| {
+///     agent.api.app.bsky.feed.get_timeline(params)
+/// })?;
+/// ```
+#[macro_export]
+macro_rules! agent_call {
+    ($client:expr, |$agent:ident| $body:expr) => {{
+        match &$client.agent {
+            $crate::AuthAgent::Password(a) => {
+                let $agent = a;
+                ::futures::executor::block_on($body)
+            }
+            $crate::AuthAgent::OAuth(a) => {
+                let $agent = a;
+                ::futures::executor::block_on($body)
+            }
+        }
+    }};
+}
 
 /// Default app-data directory. Written to from [`store::FileSessionStore`] and
 /// read by [`credentials::load_credentials`]. Matches our TITLEID `BSKY00001`.

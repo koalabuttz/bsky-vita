@@ -153,6 +153,9 @@ pub enum RenderError {
     /// pointer (asset missing, corrupt, or unsupported format).
     /// The `&'static str` carries which loader failed.
     TextureLoad(&'static str),
+    /// QR encoding failed (input string can't fit in the largest QR version,
+    /// or contains invalid bytes). Phase 11.5.
+    QrEncode(String),
     /// Method was called on a non-Vita target where rendering is unavailable.
     NotOnVita,
 }
@@ -164,6 +167,7 @@ impl core::fmt::Display for RenderError {
             RenderError::PgfLoad => write!(f, "vita2d_load_default_pgf returned null"),
             RenderError::TtfLoad => write!(f, "vita2d_load_font_file returned null"),
             RenderError::TextureLoad(what) => write!(f, "texture load failed ({what})"),
+            RenderError::QrEncode(msg) => write!(f, "qr encode failed: {msg}"),
             RenderError::NotOnVita => write!(f, "render is only supported on the Vita target"),
         }
     }
@@ -356,6 +360,46 @@ pub struct Texture {
     ptr: NonNull<ffi::vita2d_texture>,
     width: i32,
     height: i32,
+}
+
+/// Encode `s` as a QR code matrix and expand to an RGBA buffer with a
+/// 4-module white quiet zone. Returns `(rgba_bytes, side_pixels)`.
+///
+/// The result is row-major ABGR-ordered (vita2d's native format): black
+/// `0x000000FF` for dark modules, white `0xFFFFFFFF` everywhere else.
+/// Each QR module becomes a `module_px × module_px` solid block.
+fn qr_to_rgba(s: &str, module_px: u32) -> Result<(Vec<u8>, u32), RenderError> {
+    let code = qrcode::QrCode::new(s.as_bytes())
+        .map_err(|e| RenderError::QrEncode(format!("{e}")))?;
+    let modules = code.width(); // matrix side in modules
+    let colors = code.to_colors(); // flat row-major; Color::Dark or Color::Light
+    const QUIET: usize = 4; // standard spec quiet zone
+    let total_modules = modules + 2 * QUIET;
+    let mpx = module_px as usize;
+    let side = total_modules * mpx;
+    // Pre-fill with opaque white; flip dark modules to opaque black.
+    let mut rgba = vec![0xFFu8; side * side * 4];
+    for my in 0..modules {
+        for mx in 0..modules {
+            if !matches!(colors[my * modules + mx], qrcode::Color::Dark) {
+                continue;
+            }
+            let start_x = (mx + QUIET) * mpx;
+            let start_y = (my + QUIET) * mpx;
+            for py in 0..mpx {
+                let row_y = start_y + py;
+                let row_start = row_y * side * 4;
+                for px in 0..mpx {
+                    let off = row_start + (start_x + px) * 4;
+                    rgba[off] = 0; // R
+                    rgba[off + 1] = 0; // G
+                    rgba[off + 2] = 0; // B
+                    // alpha stays at 255
+                }
+            }
+        }
+    }
+    Ok((rgba, side as u32))
 }
 
 impl Texture {
@@ -616,6 +660,33 @@ impl Texture {
     #[cfg(not(target_os = "vita"))]
     pub fn upload_rgba(&self, rgba: &[u8]) {
         let _ = rgba;
+    }
+
+    /// Encode `s` as a QR code and upload it to a fresh RGBA texture.
+    ///
+    /// `module_px` controls the on-screen size of each QR "module" (one
+    /// black/white square). For ~280-char authorize URLs at ~6 px/module
+    /// the resulting texture is roughly 420×420 — fits comfortably on the
+    /// Vita's 960×544 screen with instruction text alongside.
+    ///
+    /// Wraps the QR matrix in a 4-module white quiet zone (the spec
+    /// requires it for reliable phone-camera scanning). The texture is
+    /// pure black/white RGBA8 ABGR-ordered, ready for `draw_texture` /
+    /// `draw_texture_scale`.
+    #[cfg(target_os = "vita")]
+    pub fn from_qr_string(s: &str, module_px: u32) -> Result<Self, RenderError> {
+        let (rgba, dim) = qr_to_rgba(s, module_px)?;
+        let tex = Self::new_rgba(dim, dim)?;
+        tex.upload_rgba(&rgba);
+        Ok(tex)
+    }
+
+    #[cfg(not(target_os = "vita"))]
+    pub fn from_qr_string(s: &str, module_px: u32) -> Result<Self, RenderError> {
+        let _ = (s, module_px);
+        // Still exercises the encoder on host for tests.
+        let _ = qr_to_rgba(s, module_px)?;
+        Err(RenderError::NotOnVita)
     }
 
     pub fn width(&self) -> i32 {
@@ -1602,5 +1673,32 @@ mod tests {
             Err(other) => panic!("expected NotOnVita on host, got {other:?}"),
             Ok(_) => panic!("expected NotOnVita on host, got Ok"),
         }
+    }
+
+    #[test]
+    fn qr_encodes_short_string_to_buffer_with_quiet_zone() {
+        // A short ASCII string fits in QR version 1 (21 modules) at EC level M.
+        // With quiet zone (4 modules each side) and 4 px per module:
+        //   total side = (21 + 2*4) * 4 = 29 * 4 = 116 px.
+        let (rgba, side) = qr_to_rgba("hello", 4).expect("encode");
+        assert_eq!(side, 116);
+        assert_eq!(rgba.len(), (116 * 116 * 4) as usize);
+        // Corner (in the quiet zone) must be white.
+        assert_eq!(rgba[0..4], [0xFF, 0xFF, 0xFF, 0xFF]);
+        // Buffer must contain at least one black pixel somewhere.
+        let has_black = rgba.chunks_exact(4).any(|p| p[0] == 0 && p[1] == 0 && p[2] == 0);
+        assert!(has_black, "no dark module rendered");
+    }
+
+    #[test]
+    fn qr_encodes_typical_authorize_url() {
+        // Authorize URLs are ~250-300 chars. This should fit comfortably and
+        // round-trip the encoder without panicking.
+        let url = "https://bsky.social/oauth/authorize?\
+                   client_id=https%3A%2F%2Fdavidlewis.xyz%2Fbsky-vita%2Fclient_metadata.json&\
+                   request_uri=urn%3Aietf%3Aparams%3Aoauth%3Arequest_uri%3Areq-1234567890abcdef";
+        let (_rgba, side) = qr_to_rgba(url, 6).expect("encode");
+        // The exact module count depends on QR version selection; sanity-bound it.
+        assert!(side >= 200 && side <= 700, "unexpected side: {side}");
     }
 }

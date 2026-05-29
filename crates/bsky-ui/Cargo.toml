@@ -10,6 +10,7 @@ bsky-render = { path = "../bsky-render" }
 bsky-input  = { path = "../bsky-input" }
 bsky-ime    = { path = "../bsky-ime" }
 bsky-auth   = { path = "../bsky-auth" }
+bsky-oauth  = { path = "../bsky-oauth" }
 bsky-worker = { path = "../bsky-worker" }
 bsky-video  = { path = "../bsky-video" }
 bsky-media  = { path = "../bsky-media" }
