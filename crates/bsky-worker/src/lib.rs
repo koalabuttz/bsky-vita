@@ -407,6 +407,15 @@ pub enum WorkResponse {
         cid: String,
         result: Result<String, String>,
     },
+    /// Incremental download progress for a video blob, emitted during
+    /// `FetchVideoBlob` before the final `VideoBlob`. `total` is the
+    /// server's `Content-Length` if present. Drives the "Loading video…"
+    /// progress bar; throttled (~every 512 KB) by the worker.
+    VideoBlobProgress {
+        cid: String,
+        downloaded: u64,
+        total: Option<u64>,
+    },
     /// One page of an actor's custom feeds. `actor` is the resolved DID
     /// — used by ProfileScreen as the staleness key (drops responses
     /// that arrive after the user has navigated to a different profile).
@@ -503,7 +512,7 @@ fn run(
     responses: Sender<WorkResponse>,
 ) {
     while let Ok(req) = requests.recv() {
-        let resp = handle_request(&client, req);
+        let resp = handle_request(&client, req, &responses);
         log_if_err(&resp);
         if responses.send(resp).is_err() {
             // Main thread dropped the receiver — exit.
@@ -572,7 +581,11 @@ fn log_if_err(resp: &WorkResponse) {
     }
 }
 
-fn handle_request(client: &AuthClient, req: WorkRequest) -> WorkResponse {
+fn handle_request(
+    client: &AuthClient,
+    req: WorkRequest,
+    responses: &Sender<WorkResponse>,
+) -> WorkResponse {
     match req {
         WorkRequest::FetchProfile { actor } => {
             // Resolve actor: None ⇒ session's own DID; Some(s) ⇒ use directly.
@@ -647,7 +660,9 @@ fn handle_request(client: &AuthClient, req: WorkRequest) -> WorkResponse {
         WorkRequest::DeleteFollow { rkey } => delete_follow(client, &rkey),
         WorkRequest::SearchActors { q, cursor } => search_actors_handler(client, q, cursor),
         WorkRequest::SearchPosts { q, cursor } => search_posts_handler(client, q, cursor),
-        WorkRequest::FetchVideoBlob { did, cid } => fetch_video_blob(client, did, cid),
+        WorkRequest::FetchVideoBlob { did, cid } => {
+            fetch_video_blob(client, did, cid, responses)
+        }
         WorkRequest::FetchActorFeeds { actor, cursor } => {
             fetch_actor_feeds(client, actor, cursor)
         }
@@ -1782,7 +1797,12 @@ fn create_thread(
 /// (atrium's authenticated agent only knows the *user's* PDS), then
 /// GET the blob with `VitaHttpClient` (auth-free). If the file
 /// already exists with non-zero size, skip the network entirely.
-fn fetch_video_blob(_client: &AuthClient, did_str: String, cid_str: String) -> WorkResponse {
+fn fetch_video_blob(
+    _client: &AuthClient,
+    did_str: String,
+    cid_str: String,
+    responses: &Sender<WorkResponse>,
+) -> WorkResponse {
     let dir = format!("{}/video", bsky_auth::DATA_DIR);
     let path = format!("{}/{}.mp4", dir, cid_str);
 
@@ -1824,12 +1844,25 @@ fn fetch_video_blob(_client: &AuthClient, did_str: String, cid_str: String) -> W
         cid_str,
     );
     bsky_log::log!("VideoBlob: fetching {url}");
-    let bytes = match fetch_image_bytes(&url) {
+    // Stream the body, forwarding throttled progress to the UI's
+    // "Loading video…" bar (~every 512 KB, plus the first chunk so the
+    // bar appears promptly). Video blobs can be tens of MB.
+    let mut last_sent: u64 = 0;
+    let bytes = match http.get_with_progress(&url, |downloaded, total| {
+        if last_sent == 0 || downloaded.saturating_sub(last_sent) >= 512 * 1024 {
+            last_sent = downloaded;
+            let _ = responses.send(WorkResponse::VideoBlobProgress {
+                cid: cid_str.clone(),
+                downloaded,
+                total,
+            });
+        }
+    }) {
         Ok(b) => b,
         Err(e) => {
             return WorkResponse::VideoBlob {
                 cid: cid_str,
-                result: Err(format!("{e}")),
+                result: Err(e),
             }
         }
     };

@@ -1123,7 +1123,7 @@ impl Screen for TimelineScreen {
             // Search results belong to SearchScreen.
             WorkResponse::SearchActors(_) | WorkResponse::SearchPosts(_) => {}
             // Video blob responses belong to VideoPlayerScreen.
-            WorkResponse::VideoBlob { .. } => {}
+            WorkResponse::VideoBlob { .. } | WorkResponse::VideoBlobProgress { .. } => {}
             // Profile-tab content belongs to ProfileScreen.
             WorkResponse::ActorFeeds { .. }
             | WorkResponse::ActorLists { .. }

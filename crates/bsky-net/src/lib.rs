@@ -31,11 +31,60 @@ impl Default for VitaHttpClient {
 
 impl VitaHttpClient {
     pub fn new() -> Self {
+        // Inactivity timeouts, NOT an overall deadline. `timeout_read` /
+        // `timeout_write` bound how long a single socket op may stall with
+        // no progress; as long as bytes keep flowing the clock resets. A
+        // previous overall `.timeout(45s)` killed large-but-progressing
+        // downloads (a 20 MB video on slow wifi exceeds 45s even while
+        // steadily transferring) — fatal for video blobs, which are read
+        // whole into memory. With inactivity timeouts a slow steady
+        // download finishes; only a genuinely stalled connection errors.
         let agent = ureq::AgentBuilder::new()
             .timeout_connect(std::time::Duration::from_secs(15))
-            .timeout(std::time::Duration::from_secs(45))
+            .timeout_read(std::time::Duration::from_secs(30))
+            .timeout_write(std::time::Duration::from_secs(30))
             .build();
         Self { agent }
+    }
+
+    /// GET `url` and read the whole body into memory, invoking
+    /// `on_progress(downloaded, total)` as bytes arrive (`total` is the
+    /// `Content-Length` if the server sent one, else `None`). Synchronous
+    /// (ureq is blocking) and auth-free — used by the worker's video-blob
+    /// download to drive the "Loading video…" progress bar. Reads in 64 KB
+    /// chunks; the caller is expected to throttle `on_progress` if it
+    /// forwards updates over a channel.
+    pub fn get_with_progress(
+        &self,
+        url: &str,
+        mut on_progress: impl FnMut(u64, Option<u64>),
+    ) -> Result<Vec<u8>, String> {
+        let resp = match self.agent.get(url).call() {
+            Ok(r) => r,
+            // ureq classifies HTTP >= 400 as Err(Status); surface the code.
+            Err(ureq::Error::Status(code, _)) => return Err(format!("HTTP {code}")),
+            Err(e) => return Err(format!("{e}")),
+        };
+        let total: Option<u64> = resp
+            .header("Content-Length")
+            .and_then(|s| s.parse::<u64>().ok());
+        let mut reader = resp.into_reader();
+        let mut out: Vec<u8> = Vec::new();
+        if let Some(t) = total {
+            out.reserve(t.min(64 * 1024 * 1024) as usize);
+        }
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    out.extend_from_slice(&buf[..n]);
+                    on_progress(out.len() as u64, total);
+                }
+                Err(e) => return Err(format!("read: {e}")),
+            }
+        }
+        Ok(out)
     }
 }
 

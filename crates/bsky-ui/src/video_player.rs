@@ -105,6 +105,12 @@ pub struct VideoPlayerScreen {
     notice_dont_show: bool,
     notice_ok_btn: ButtonState,
     notice_check: ButtonState,
+    /// Download progress for the "Loading video…" screen, fed by
+    /// `WorkResponse::VideoBlobProgress`. `dl_total` is the server's
+    /// Content-Length if it sent one (else indeterminate). Both stay 0 /
+    /// None on a cache hit (no download).
+    dl_done: u64,
+    dl_total: Option<u64>,
 }
 
 impl VideoPlayerScreen {
@@ -119,6 +125,8 @@ impl VideoPlayerScreen {
             notice_dont_show: false,
             notice_ok_btn: ButtonState::default(),
             notice_check: ButtonState::default(),
+            dl_done: 0,
+            dl_total: None,
         }
     }
 
@@ -372,14 +380,42 @@ impl Screen for VideoPlayerScreen {
             VideoState::Pending | VideoState::Downloading => {
                 frame.draw_text_centered(
                     font,
-                    SCREEN_HEIGHT / 2,
+                    SCREEN_HEIGHT / 2 - 24,
                     theme::TEXT_PRIMARY,
                     1.1,
                     "Loading video…",
                 );
+                // Progress appears once the first bytes arrive (stays
+                // hidden on a cache hit / pre-download Pending frame).
+                if self.dl_done > 0 {
+                    let bar_w = 320.0_f32;
+                    let bar_h = 10.0_f32;
+                    let bar_x = (SCREEN_WIDTH as f32 - bar_w) / 2.0;
+                    let bar_y = (SCREEN_HEIGHT / 2 + 6) as f32;
+                    let mb = |b: u64| b as f32 / (1024.0 * 1024.0);
+                    let label = match self.dl_total {
+                        Some(t) if t > 0 => {
+                            // Determinate: track + accent fill to fraction.
+                            frame.fill_rect(bar_x, bar_y, bar_w, bar_h, theme::FIELD_BG);
+                            let frac = (self.dl_done as f32 / t as f32).clamp(0.0, 1.0);
+                            frame.fill_rect(bar_x, bar_y, bar_w * frac, bar_h, theme::ACCENT);
+                            let pct = self.dl_done.min(t) * 100 / t;
+                            format!("{:.1} / {:.1} MB  ({pct}%)", mb(self.dl_done), mb(t))
+                        }
+                        // Indeterminate (no Content-Length): just the count.
+                        _ => format!("{:.1} MB", mb(self.dl_done)),
+                    };
+                    frame.draw_text_centered(
+                        font,
+                        SCREEN_HEIGHT / 2 + 32,
+                        theme::TEXT_MUTED,
+                        0.85,
+                        &label,
+                    );
+                }
                 frame.draw_text_centered(
                     font,
-                    SCREEN_HEIGHT / 2 + 28,
+                    SCREEN_HEIGHT / 2 + 60,
                     theme::TEXT_MUTED,
                     0.85,
                     "CIRCLE to cancel",
@@ -447,14 +483,18 @@ impl Screen for VideoPlayerScreen {
     }
 
     fn handle_worker_response(&mut self, resp: WorkResponse) {
-        if let WorkResponse::VideoBlob { cid, result } = resp {
-            if cid != self.cid {
-                return; // Not for us.
+        match resp {
+            WorkResponse::VideoBlob { cid, result } if cid == self.cid => {
+                self.state = match result {
+                    Ok(file_path) => VideoState::Ready { file_path },
+                    Err(e) => VideoState::Error(e),
+                };
             }
-            self.state = match result {
-                Ok(file_path) => VideoState::Ready { file_path },
-                Err(e) => VideoState::Error(e),
-            };
+            WorkResponse::VideoBlobProgress { cid, downloaded, total } if cid == self.cid => {
+                self.dl_done = downloaded;
+                self.dl_total = total;
+            }
+            _ => {}
         }
     }
 }
