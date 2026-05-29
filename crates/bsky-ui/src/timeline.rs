@@ -1035,6 +1035,19 @@ impl Screen for TimelineScreen {
         if self.is_pushed { None } else { Some(TopLevel::Home) }
     }
 
+    fn control_hints(&self) -> Vec<(&'static str, &'static str)> {
+        let mut v = vec![
+            ("SQUARE", "Compose"),
+            ("L1", "Like"),
+            ("TRIANGLE", "Repost"),
+            ("R1", "Reply"),
+        ];
+        if self.is_pushed {
+            v.push(("CIRCLE", "Back"));
+        }
+        v
+    }
+
     fn handle_worker_response(&mut self, resp: WorkResponse) {
         match resp {
             // Feed page for the *currently shown* feed.

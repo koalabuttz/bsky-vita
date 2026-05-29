@@ -61,6 +61,16 @@ pub trait Screen {
     fn top_level(&self) -> Option<TopLevel> {
         None
     }
+
+    /// Primary, teachable controls for this screen, shown in the
+    /// auto-hiding hint bar (drawn centrally by main.rs). Each entry is
+    /// `(button label, action)`, e.g. `("L1", "Like")`. Curate to the
+    /// non-obvious controls — scrolling and tab-bar nav are intuitive.
+    /// Default: none, so the bar doesn't appear (used by screens that
+    /// already render their own hints, like the video player).
+    fn control_hints(&self) -> Vec<(&'static str, &'static str)> {
+        Vec::new()
+    }
 }
 
 /// Outcome of a `Screen::frame` call. Drives screen routing in main.rs.

@@ -453,6 +453,15 @@ impl Screen for ThreadScreen {
         ScreenAction::None
     }
 
+    fn control_hints(&self) -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("R1", "Reply"),
+            ("L1", "Like"),
+            ("TRIANGLE", "Repost"),
+            ("CIRCLE", "Back"),
+        ]
+    }
+
     fn handle_worker_response(&mut self, resp: WorkResponse) {
         match resp {
             WorkResponse::Thread(Ok(batch)) => {

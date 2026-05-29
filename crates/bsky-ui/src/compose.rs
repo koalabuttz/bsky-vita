@@ -781,6 +781,10 @@ impl Screen for ComposeScreen {
         ScreenAction::None
     }
 
+    fn control_hints(&self) -> Vec<(&'static str, &'static str)> {
+        vec![("CIRCLE", "Cancel")]
+    }
+
     fn handle_worker_response(&mut self, resp: WorkResponse) {
         // Route local-file image reads (picker thumbnails) into the picker.
         if let WorkResponse::Image { url, bytes } = &resp {

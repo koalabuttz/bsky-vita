@@ -643,6 +643,10 @@ impl Screen for SearchScreen {
     fn top_level(&self) -> Option<TopLevel> {
         Some(TopLevel::Search)
     }
+
+    fn control_hints(&self) -> Vec<(&'static str, &'static str)> {
+        vec![("D-pad", "People / Posts")]
+    }
 }
 
 enum SearchTapAction {

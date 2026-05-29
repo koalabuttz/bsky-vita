@@ -701,6 +701,10 @@ impl Screen for ConversationScreen {
     fn top_level(&self) -> Option<TopLevel> {
         None
     }
+
+    fn control_hints(&self) -> Vec<(&'static str, &'static str)> {
+        vec![("CIRCLE", "Back")]
+    }
 }
 
 /// Conversation title: the other member's name (group: "name +N").

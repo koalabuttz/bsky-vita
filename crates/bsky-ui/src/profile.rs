@@ -1459,6 +1459,18 @@ impl Screen for ProfileScreen {
         }
     }
 
+    fn control_hints(&self) -> Vec<(&'static str, &'static str)> {
+        let mut v = vec![
+            ("D-pad", "Tabs"),
+            ("L1", "Like"),
+            ("TRIANGLE", "Repost"),
+        ];
+        if !self.is_own() {
+            v.push(("CIRCLE", "Back"));
+        }
+        v
+    }
+
     fn handle_worker_response(&mut self, resp: WorkResponse) {
         match resp {
             WorkResponse::Profile(Ok(p)) => {

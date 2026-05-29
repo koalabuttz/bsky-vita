@@ -23,11 +23,11 @@
 use std::sync::Arc;
 
 use bsky_auth::AuthClient;
-use bsky_input::{Pad, Touch};
+use bsky_input::{buttons, Pad, Touch};
 use bsky_render::{EmojiAtlas, Render, Texture, TextureCache};
 use bsky_ui::{
-    ConversationListScreen, LoginScreen, NotificationsScreen, ProfileScreen, Screen, ScreenAction,
-    SearchScreen, TimelineScreen, TopLevel, UiCtx,
+    ConversationListScreen, HintOverlay, LoginScreen, NotificationsScreen, ProfileScreen, Screen,
+    ScreenAction, SearchScreen, TimelineScreen, TopLevel, UiCtx,
 };
 use bsky_worker::{WorkResponse, Worker};
 
@@ -108,6 +108,10 @@ fn main() {
 
     let mut texture_cache = TextureCache::new(64);
 
+    // Auto-hiding control-hints bar; shown on entry to each screen and
+    // recalled with SELECT.
+    let mut hints = HintOverlay::new();
+
     loop {
         let pf = pad.poll();
         let tf = touch.poll();
@@ -129,6 +133,17 @@ fn main() {
                 .expect("screen stack is never empty");
             let mut frame = render.begin_frame();
             let action = top.frame(&mut frame, &font, &ctx, &mut ime);
+            // Control-hints bar, composited on top of the screen. Drawn
+            // before pump_ime (which ends frame drawing) and skipped while
+            // the IME is up (the keyboard covers the screen anyway).
+            hints.tick();
+            if pf.just_pressed(buttons::SELECT) {
+                hints.toggle();
+            }
+            if !ime.is_active() {
+                let hint_list = top.control_hints();
+                hints.draw(&mut frame, &font, &hint_list, top.top_level().is_some());
+            }
             if ime.is_active() {
                 frame.pump_ime();
             }
@@ -199,6 +214,10 @@ fn main() {
             }
         }
 
+        // Any screen change re-shows the hint bar on the new page.
+        if !matches!(action, ScreenAction::None) {
+            hints.show();
+        }
         match action {
             ScreenAction::None => {}
             ScreenAction::Push(next) => {

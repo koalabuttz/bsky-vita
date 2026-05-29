@@ -7,6 +7,7 @@ pub mod conversation;
 pub mod conversations;
 pub mod embeds;
 pub mod file_picker;
+pub mod hints;
 pub mod image_viewer;
 pub mod imgutil;
 pub mod login;
@@ -21,6 +22,7 @@ pub mod video_player;
 pub mod widget;
 
 pub use compose::ComposeScreen;
+pub use hints::HintOverlay;
 pub use conversation::ConversationScreen;
 pub use conversations::ConversationListScreen;
 pub use login::LoginScreen;
