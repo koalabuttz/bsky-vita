@@ -943,22 +943,42 @@ impl TextureCache {
     /// oldest entry on overflow.
     pub fn insert(&mut self, url: String, bytes: &[u8]) -> Result<(), RenderError> {
         let texture = Texture::from_image_bytes(bytes)?;
-        // If updating existing, drop the old entry's slot in order.
+        self.insert_texture(url, texture);
+        Ok(())
+    }
+
+    /// Decode `bytes` into a 4 bpp RGBA8 texture and insert. Use for
+    /// images that will be alpha-masked — i.e. avatars via
+    /// [`Texture::apply_circular_mask`]. vita2d decodes JPEG to 3 bpp RGB
+    /// (no alpha channel), and the mask's `x*4+3` alpha write both walks
+    /// the wrong stride and has no alpha to clear on such a texture —
+    /// which is what produced the vertical black/red stripes on avatars.
+    /// Forcing a 4 bpp copy (with opaque alpha) here fixes that. Capped at
+    /// 256² (avatars draw at ≤96 px; the cap bounds memory and keeps a
+    /// crisp masked edge). Non-masked images use [`insert`] and stay
+    /// 3 bpp to save memory.
+    pub fn insert_rgba(&mut self, url: String, bytes: &[u8]) -> Result<(), RenderError> {
+        let texture = Texture::decode_scaled(bytes, 256, 256)?;
+        self.insert_texture(url, texture);
+        Ok(())
+    }
+
+    /// Shared LRU bookkeeping for a freshly-decoded texture: replace any
+    /// existing entry for `url`, else evict the LRU entry at capacity,
+    /// then insert at the most-recently-used position. (Dropping an
+    /// evicted/replaced `Texture` calls `vita2d_free_texture`.)
+    fn insert_texture(&mut self, url: String, texture: Texture) {
         if self.map.contains_key(&url) {
             if let Some(pos) = self.order.iter().position(|u| u == &url) {
                 self.order.remove(pos);
             }
         } else if self.map.len() >= self.capacity {
-            // At capacity — evict the LRU entry first. Drop the texture
-            // explicitly via remove from the map (which calls Drop ->
-            // vita2d_free_texture).
             if let Some(victim) = self.order.pop_front() {
                 self.map.remove(&victim);
             }
         }
         self.map.insert(url.clone(), texture);
         self.order.push_back(url);
-        Ok(())
     }
 
     /// Number of entries currently cached.

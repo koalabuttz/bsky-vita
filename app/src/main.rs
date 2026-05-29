@@ -159,15 +159,22 @@ fn main() {
                         // shared avatar/embed cache.
                         resp
                     } else {
-                    match texture_cache.insert(url.clone(), b) {
+                    // Avatars are alpha-masked into circles, so they must
+                    // be 4 bpp RGBA. vita2d decodes JPEG to 3 bpp RGB
+                    // (no alpha channel); under the mask that corrupts the
+                    // pixels (the vertical black/red stripe bug). insert_rgba
+                    // forces a 4 bpp copy; other images stay 3 bpp via insert.
+                    let is_avatar = url.contains("/avatar_thumbnail/");
+                    let inserted = if is_avatar {
+                        texture_cache.insert_rgba(url.clone(), b)
+                    } else {
+                        texture_cache.insert(url.clone(), b)
+                    };
+                    match inserted {
                         Ok(()) => {
-                            // Apply circular alpha mask to avatars so
-                            // they composite cleanly over arbitrary
-                            // backgrounds (banner images, in particular).
-                            // Bsky's avatar CDN URLs always go through
-                            // the avatar-thumbnail/ path; that's our
-                            // signal.
-                            if url.contains("/avatar_thumbnail/") {
+                            // Circular alpha mask so avatars composite
+                            // cleanly over arbitrary backgrounds (banners).
+                            if is_avatar {
                                 if let Some(tex) = texture_cache.get(url) {
                                     tex.apply_circular_mask();
                                 }
