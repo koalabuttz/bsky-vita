@@ -27,8 +27,10 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use atrium_api::app::bsky::feed::defs::FeedViewPost;
-use atrium_api::types::{TryFromUnknown, Unknown};
+use atrium_api::app::bsky::feed::defs::{
+    FeedViewPost, FeedViewPostReasonRefs, ReplyRefParentRefs,
+};
+use atrium_api::types::{TryFromUnknown, Union, Unknown};
 use bsky_auth::AuthClient;
 use bsky_ime::Ime;
 use bsky_input::buttons;
@@ -77,6 +79,10 @@ pub(crate) const TOP_LINE_H: i32 = 24;
 pub(crate) const BODY_GAP: i32 = 8;
 /// Counts row height + bottom padding + separator gap.
 pub(crate) const FOOTER_H: i32 = 28;
+/// Height of the optional repost/reply context line drawn above a post
+/// row (one line at scale 0.85 + a little padding). Added on top of the
+/// row when [`post_context_label`] returns `Some`.
+pub(crate) const CONTEXT_LINE_H: i32 = 22;
 
 /// Pixels per d-pad press.
 const DPAD_STEP: f32 = 80.0;
@@ -326,10 +332,16 @@ pub(crate) fn detect_post_tap_action(
     touches: &[(i32, i32)],
     emoji: Option<&bsky_render::EmojiAtlas>,
     idx: usize,
+    show_context: bool,
 ) -> Option<TapAction> {
+    // Top-anchored zones (author, body, embeds) shift down by the
+    // context-line height, matching draw_post_row. The counts row is
+    // bottom-anchored (row_y + row_h - FOOTER_H), so it's unaffected.
+    let ctx_h = context_line_height(post, show_context);
+    let content_y = row_y + ctx_h;
     let author_rect = Rect::new(
         0.0,
-        (row_y + ROW_PAD_Y) as f32,
+        (content_y + ROW_PAD_Y) as f32,
         TEXT_LEFT as f32,
         AVATAR_SIZE as f32,
     );
@@ -352,7 +364,7 @@ pub(crate) fn detect_post_tap_action(
         post.post.embed.as_ref(),
         post.post.author.did.as_ref(),
     ) {
-        if let Some((ey, eh)) = crate::embeds::embed_rect(frame, font, post, row_y, emoji) {
+        if let Some((ey, eh)) = crate::embeds::embed_rect(frame, font, post, content_y, emoji) {
             let er = Rect::new(
                 TEXT_LEFT as f32,
                 ey as f32,
@@ -365,7 +377,7 @@ pub(crate) fn detect_post_tap_action(
         }
     }
     if let Some(quote_uri) = crate::embeds::quote_uri_in_embed(post.post.embed.as_ref()) {
-        if let Some((ey, eh)) = crate::embeds::embed_rect(frame, font, post, row_y, emoji) {
+        if let Some((ey, eh)) = crate::embeds::embed_rect(frame, font, post, content_y, emoji) {
             let embed_rect = Rect::new(
                 TEXT_LEFT as f32,
                 ey as f32,
@@ -378,7 +390,7 @@ pub(crate) fn detect_post_tap_action(
         }
     }
     // Image embed → open the tapped image in the full-screen viewer.
-    if let Some((images, rects)) = crate::embeds::image_tap_cells(frame, font, post, row_y, emoji) {
+    if let Some((images, rects)) = crate::embeds::image_tap_cells(frame, font, post, content_y, emoji) {
         for (i, &(rx, ry, rw, rh)) in rects.iter().enumerate() {
             if touches
                 .iter()
@@ -390,9 +402,9 @@ pub(crate) fn detect_post_tap_action(
     }
     let body_rect = Rect::new(
         TEXT_LEFT as f32,
-        (row_y + ROW_PAD_Y) as f32,
+        (content_y + ROW_PAD_Y) as f32,
         (SCREEN_WIDTH - TEXT_LEFT - ROW_PAD_X) as f32,
-        (row_h - ROW_PAD_Y - FOOTER_H) as f32,
+        (row_h - ctx_h - ROW_PAD_Y - FOOTER_H) as f32,
     );
     if touches.iter().any(|&(x, y)| body_rect.contains(x, y)) {
         return Some(TapAction::OpenThread(post.post.uri.clone()));
@@ -593,7 +605,7 @@ impl Screen for TimelineScreen {
         if let TimelineState::Loaded { posts, .. } = &self.state {
             while self.row_heights.len() < posts.len() {
                 let i = self.row_heights.len();
-                let h = measure_post_row(frame, font, &posts[i], ctx.emoji);
+                let h = measure_post_row(frame, font, &posts[i], ctx.emoji, true);
                 self.row_heights.push(h);
             }
         }
@@ -860,9 +872,14 @@ impl Screen for TimelineScreen {
                 {
                     let row_bottom = y_probe + row_h;
                     if row_bottom > VIEWPORT_TOP && y_probe < VIEWPORT_BOTTOM {
+                        // Feed rows always show repost/reply context, so
+                        // shift top-anchored tap zones down by ctx_h to
+                        // match draw_post_row. Counts stay bottom-anchored.
+                        let ctx_h = context_line_height(post, true);
+                        let content_y = y_probe + ctx_h;
                         let author_rect = Rect::new(
                             0.0,
-                            (y_probe + ROW_PAD_Y) as f32,
+                            (content_y + ROW_PAD_Y) as f32,
                             TEXT_LEFT as f32,
                             AVATAR_SIZE as f32,
                         );
@@ -902,7 +919,7 @@ impl Screen for TimelineScreen {
                             post.post.author.did.as_ref(),
                         ) {
                             if let Some((ey, eh)) =
-                                crate::embeds::embed_rect(frame, font, post, y_probe, ctx.emoji)
+                                crate::embeds::embed_rect(frame, font, post, content_y, ctx.emoji)
                             {
                                 let er = Rect::new(
                                     TEXT_LEFT as f32,
@@ -923,7 +940,7 @@ impl Screen for TimelineScreen {
                             crate::embeds::quote_uri_in_embed(post.post.embed.as_ref())
                         {
                             if let Some((ey, eh)) =
-                                crate::embeds::embed_rect(frame, font, post, y_probe, ctx.emoji)
+                                crate::embeds::embed_rect(frame, font, post, content_y, ctx.emoji)
                             {
                                 let embed_rect = Rect::new(
                                     TEXT_LEFT as f32,
@@ -942,7 +959,7 @@ impl Screen for TimelineScreen {
                         // fallback so a tap on an image opens it, not the
                         // thread).
                         if let Some((images, rects)) =
-                            crate::embeds::image_tap_cells(frame, font, post, y_probe, ctx.emoji)
+                            crate::embeds::image_tap_cells(frame, font, post, content_y, ctx.emoji)
                         {
                             if let Some(i) = rects.iter().position(|&(rx, ry, rw, rh)| {
                                 touches
@@ -958,9 +975,9 @@ impl Screen for TimelineScreen {
                         // embed → open thread for *this* post.
                         let body_rect = Rect::new(
                             TEXT_LEFT as f32,
-                            (y_probe + ROW_PAD_Y) as f32,
+                            (content_y + ROW_PAD_Y) as f32,
                             (SCREEN_WIDTH - TEXT_LEFT - ROW_PAD_X) as f32,
-                            (row_h - ROW_PAD_Y - FOOTER_H) as f32,
+                            (row_h - ctx_h - ROW_PAD_Y - FOOTER_H) as f32,
                         );
                         if touches.iter().any(|&(x, y)| body_rect.contains(x, y)) {
                             tap_action = Some(TapAction::OpenThread(post.post.uri.clone()));
@@ -1138,6 +1155,60 @@ impl Screen for TimelineScreen {
     }
 }
 
+/// Display name for a `ProfileViewBasic`, falling back to `@handle` when
+/// the display name is absent or empty (mirrors the author idiom in
+/// [`draw_post_row`]).
+fn display_or_handle(profile: &atrium_api::app::bsky::actor::defs::ProfileViewBasic) -> String {
+    profile
+        .display_name
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("@{}", profile.handle.as_str()))
+}
+
+/// The feed-context label to draw above a post row, or `None` if the row
+/// needs no context line. Drives both the row height and the draw.
+///
+/// - Reposts win: a reposted post shows "Reposted by X" even if it is
+///   also a reply (the repost is why it's in the feed).
+/// - Replies show "Reply to @handle", except self-thread continuations
+///   (replying to yourself), which Bluesky surfaces as your own thread,
+///   not a "reply to" — suppressed here.
+/// - Deleted/blocked parents (`NotFoundPost`/`BlockedPost`), pinned posts
+///   (`ReasonPin`, rendered separately by ProfileScreen), and ordinary
+///   top-level posts yield `None`.
+///
+/// `show_context` is `false` for Thread (redundant) and Search (no
+/// reason/reply data) callers, short-circuiting to `None`.
+fn post_context_label(post: &FeedViewPost, show_context: bool) -> Option<String> {
+    if !show_context {
+        return None;
+    }
+    // Repost reason takes precedence.
+    if let Some(Union::Refs(FeedViewPostReasonRefs::ReasonRepost(r))) = post.reason.as_ref() {
+        return Some(format!("Reposted by {}", display_or_handle(&r.by)));
+    }
+    // Otherwise, a reply to someone other than the author.
+    if let Some(reply) = post.reply.as_ref() {
+        if let Union::Refs(ReplyRefParentRefs::PostView(parent)) = &reply.parent {
+            if parent.author.did != post.post.author.did {
+                return Some(format!("Reply to @{}", parent.author.handle.as_str()));
+            }
+        }
+    }
+    None
+}
+
+/// Height the context line adds to a row (0 when there's no label).
+pub(crate) fn context_line_height(post: &FeedViewPost, show_context: bool) -> i32 {
+    if post_context_label(post, show_context).is_some() {
+        CONTEXT_LINE_H
+    } else {
+        0
+    }
+}
+
 /// Compute one post row's total height (without drawing). Mirrors the
 /// layout in [`draw_post_row`].
 pub(crate) fn measure_post_row(
@@ -1145,6 +1216,7 @@ pub(crate) fn measure_post_row(
     font: &Font,
     post: &FeedViewPost,
     emoji: Option<&EmojiAtlas>,
+    show_context: bool,
 ) -> i32 {
     // Body text wraps to the column right of the avatar slot.
     let inner_w = SCREEN_WIDTH - TEXT_LEFT - ROW_PAD_X;
@@ -1160,7 +1232,8 @@ pub(crate) fn measure_post_row(
         ROW_PAD_Y + TOP_LINE_H + body_h + embed_h + bottom_gap + FOOTER_H;
     // Ensure the row is at least as tall as the avatar slot.
     let avatar_block_h = ROW_PAD_Y + AVATAR_SIZE + FOOTER_H;
-    text_block_h.max(avatar_block_h)
+    // The repost/reply context line (if any) sits above everything.
+    text_block_h.max(avatar_block_h) + context_line_height(post, show_context)
 }
 
 /// Iterate through `posts`, advancing `y` by each post's cached height.
@@ -1300,6 +1373,7 @@ fn draw_post_list(
                 avatar_mask,
                 avatar_mask_field,
                 i == selected_idx,
+                true,
             );
         }
         y += row_h;
@@ -1326,10 +1400,18 @@ pub(crate) fn draw_post_row(
     avatar_mask: Option<&Texture>,
     avatar_mask_field: Option<&Texture>,
     is_selected: bool,
+    show_context: bool,
 ) {
     let row_right = SCREEN_WIDTH;
     let inner_left = TEXT_LEFT;
     let inner_w = row_right - inner_left - ROW_PAD_X;
+
+    // Optional repost/reply context line occupies the top band; the rest
+    // of the row (avatar, name, body, embed, counts) shifts down by ctx_h.
+    // body_y/counts_y derive from top_y, so shifting top_y cascades them.
+    let context_label = post_context_label(post, show_context);
+    let ctx_h = if context_label.is_some() { CONTEXT_LINE_H } else { 0 };
+    let content_top = y_top + ctx_h;
 
     // Selection highlight: faint background tint over the row + 3 px
     // ACCENT-color bar on the left edge. The avatar's circular mask
@@ -1352,9 +1434,14 @@ pub(crate) fn draw_post_row(
         );
     }
 
+    // Context line ("Reposted by X" / "Reply to @y") in the top band.
+    if let Some(label) = &context_label {
+        frame.draw_text(font, TEXT_LEFT, y_top + 16, theme::TEXT_MUTED, 0.85, label);
+    }
+
     // Avatar slot: 48×48 in the left margin, top-aligned with text top.
     let avatar_x = ROW_PAD_X;
-    let avatar_y = y_top + ROW_PAD_Y;
+    let avatar_y = content_top + ROW_PAD_Y;
     let handle_str = post.post.author.handle.as_str();
     let display_str = post
         .post
@@ -1388,7 +1475,7 @@ pub(crate) fn draw_post_row(
         .as_deref()
         .filter(|s| !s.is_empty())
         .unwrap_or(handle_str);
-    let top_y = y_top + ROW_PAD_Y;
+    let top_y = content_top + ROW_PAD_Y;
     frame.draw_text(font, inner_left, top_y, theme::TEXT_PRIMARY, 1.0, display);
 
     let handle = format!("@{handle_str}");

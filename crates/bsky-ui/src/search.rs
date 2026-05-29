@@ -182,7 +182,7 @@ impl Screen for SearchScreen {
             SearchState::Posts(posts) => {
                 while self.row_heights.len() < posts.len() {
                     let i = self.row_heights.len();
-                    let h = measure_post_row(frame, font, &posts[i], ctx.emoji);
+                    let h = measure_post_row(frame, font, &posts[i], ctx.emoji, false);
                     self.row_heights.push(h);
                 }
             }
@@ -325,6 +325,7 @@ impl Screen for SearchScreen {
                                 ctx.avatar_mask,
                                 ctx.avatar_mask_field,
                                 i == self.selected_idx,
+                                false,
                             );
                         }
                         y += row_h;

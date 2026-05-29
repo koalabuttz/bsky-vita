@@ -815,6 +815,7 @@ impl Screen for ProfileScreen {
                         font,
                         &state.posts[i],
                         ctx.emoji,
+                        true,
                     );
                     state.row_heights.push(h);
                 }
@@ -1254,7 +1255,7 @@ impl Screen for ProfileScreen {
                         let row_bottom = row_y + row_h;
                         if row_bottom > pill_bottom && row_y < viewport_bottom {
                             if let Some(t) = detect_post_tap_action(
-                                frame, font, post, row_y, row_h, &touches, ctx.emoji, idx,
+                                frame, font, post, row_y, row_h, &touches, ctx.emoji, idx, true,
                             ) {
                                 tap = Some(t);
                                 break;
@@ -1986,6 +1987,7 @@ fn draw_posts_content(
             ctx.avatar_mask,
             ctx.avatar_mask_field,
             i == state.selected_idx,
+            true,
         );
         row_y = row_bottom;
     }
