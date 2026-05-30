@@ -100,16 +100,17 @@ impl FileOAuthSessionStore {
     }
 
     fn delete_from_disk(&self) -> Result<(), OAuthSessionStoreError> {
-        if self.path.exists() {
-            std::fs::remove_file(&self.path)?;
-        }
+        // Removes both the main file and its `.tmp` sidecar (so a deleted
+        // session can't be resurrected by `.tmp` recovery).
+        crate::atomic_json::delete_json(&self.path)?;
         Ok(())
     }
 }
 
 fn load_from_disk(path: &PathBuf) -> Option<PersistedEnvelope> {
-    let bytes = std::fs::read(path).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    // Recovers the freshest tokens from an orphaned `.tmp` left by an
+    // interrupted write — the fix for the one-time-use refresh-token lockout.
+    crate::atomic_json::load_json_recovering(path)
 }
 
 impl Store<Did, Session> for FileOAuthSessionStore {

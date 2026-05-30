@@ -26,6 +26,7 @@ use atrium_identity::did::CommonDidResolver;
 use atrium_identity::handle::AppViewHandleResolver;
 use bsky_net::VitaHttpClient;
 
+pub mod atomic_json;
 pub mod broker;
 pub mod client;
 pub mod session_store;

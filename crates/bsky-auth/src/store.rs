@@ -96,16 +96,17 @@ impl FileSessionStore {
     }
 
     fn delete_from_disk(&self) -> Result<(), SessionStoreError> {
-        if self.path.exists() {
-            std::fs::remove_file(&self.path)?;
-        }
+        // Removes both the main file and its `.tmp` sidecar (shared helper) so a
+        // logged-out session can't be resurrected by `.tmp` recovery.
+        bsky_oauth::atomic_json::delete_json(&self.path)?;
         Ok(())
     }
 }
 
 fn load_from_disk(path: &PathBuf) -> Option<AtpSession> {
-    let bytes = std::fs::read(path).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    // Recovers the freshest session from an orphaned `.tmp` left by an
+    // interrupted write (atproto refresh JWTs rotate too — same lockout risk).
+    bsky_oauth::atomic_json::load_json_recovering(path)
 }
 
 impl Store<(), AtpSession> for FileSessionStore {

@@ -276,8 +276,11 @@ fn teardown_to_login(
 ) {
     *worker = None;
     *auth_client = None;
-    let _ = std::fs::remove_file(bsky_auth::SESSION_PATH);
-    let _ = std::fs::remove_file(bsky_oauth::OAUTH_SESSION_PATH);
+    // Clear both session files AND their `.tmp` sidecars, so a dead/logged-out
+    // session can't be resurrected by the store's `.tmp` recovery next launch.
+    let _ = bsky_oauth::atomic_json::delete_json(std::path::Path::new(bsky_auth::SESSION_PATH));
+    let _ =
+        bsky_oauth::atomic_json::delete_json(std::path::Path::new(bsky_oauth::OAUTH_SESSION_PATH));
     screen_stack.clear();
     screen_stack.push(Box::new(LoginScreen::idle()));
 }
