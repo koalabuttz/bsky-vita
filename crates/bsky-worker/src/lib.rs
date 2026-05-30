@@ -466,6 +466,52 @@ pub enum WorkResponse {
     ConvoRead(Result<(), String>),
 }
 
+/// Auth-specific error markers in an atrium error string. A resumed
+/// session whose tokens have expired/been-revoked surfaces these (DPoP
+/// OAuth: `invalid_token`; atrium auth Display: `authentication error`;
+/// atproto XRPC: `ExpiredToken` / `Token has expired`). Distinct from
+/// transport/CDN errors, which must NOT trigger a logout.
+fn is_auth_error_str(s: &str) -> bool {
+    s.contains("invalid_token")
+        || s.contains("authentication error")
+        || s.contains("ExpiredToken")
+        || s.contains("Token has expired")
+}
+
+impl WorkResponse {
+    /// `true` if this response is an authenticated call that failed with a
+    /// token/auth error — i.e. the session is dead and the app should
+    /// return to login. Excludes the auth-free fetches (`Image` from the
+    /// CDN, `VideoBlob` via `getBlob`), whose errors are network/CDN, not
+    /// session auth.
+    pub fn auth_failed(&self) -> bool {
+        let err: Option<&str> = match self {
+            WorkResponse::Profile(Err(e)) => Some(e),
+            WorkResponse::FeedPage { batch: Err(e), .. } => Some(e),
+            WorkResponse::SavedFeeds(Err(e)) => Some(e),
+            WorkResponse::PostCreated(Err(e)) => Some(e),
+            WorkResponse::PostDeleted { result: Err(e), .. } => Some(e),
+            WorkResponse::LikeChanged(Err(e)) => Some(e),
+            WorkResponse::RepostChanged(Err(e)) => Some(e),
+            WorkResponse::FollowChanged(Err(e)) => Some(e),
+            WorkResponse::Thread(Err(e)) => Some(e),
+            WorkResponse::Notifications(Err(e)) => Some(e),
+            WorkResponse::SearchActors(Err(e)) => Some(e),
+            WorkResponse::SearchPosts(Err(e)) => Some(e),
+            WorkResponse::ActorFeeds { batch: Err(e), .. } => Some(e),
+            WorkResponse::ActorLists { batch: Err(e), .. } => Some(e),
+            WorkResponse::ActorStarterPacks { batch: Err(e), .. } => Some(e),
+            WorkResponse::Convos(Err(e)) => Some(e),
+            WorkResponse::ConvoMessages { batch: Err(e), .. } => Some(e),
+            WorkResponse::MessageSent { result: Err(e), .. } => Some(e),
+            WorkResponse::ConvoForMembers(Err(e)) => Some(e),
+            WorkResponse::ConvoRead(Err(e)) => Some(e),
+            _ => None,
+        };
+        err.is_some_and(is_auth_error_str)
+    }
+}
+
 /// Handle to the worker thread. Holds the channel ends and the thread's
 /// `JoinHandle`. `send` is non-blocking (unbounded channel); `try_recv`
 /// returns `None` if no response is ready yet.

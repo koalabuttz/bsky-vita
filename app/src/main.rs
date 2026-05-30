@@ -159,6 +159,9 @@ fn main() {
         // hand them to the TOP screen. For `Image` responses, decode
         // and insert into the cache before forwarding so screens can
         // clear inflight tracking after the cache is already populated.
+        // Set when a worker response shows the session's tokens are dead
+        // (expired/revoked) → fall back to login after the drain.
+        let mut session_dead = false;
         if let Some(w) = worker.as_ref() {
             while let Some(resp) = w.try_recv() {
                 let resp = if let WorkResponse::Image {
@@ -208,8 +211,14 @@ fn main() {
                 } else {
                     resp
                 };
+                let dead = resp.auth_failed();
                 if let Some(top) = screen_stack.last_mut() {
                     top.handle_worker_response(resp);
+                }
+                if dead {
+                    bsky_log::log!("main: session auth failed — returning to login");
+                    session_dead = true;
+                    break;
                 }
             }
         }
@@ -238,22 +247,39 @@ fn main() {
                 screen_stack.push(next);
             }
             ScreenAction::Logout => {
-                // Drop the worker (closes its channel → the thread exits and
-                // its AuthClient clone, holding the tokens, is freed) and our
-                // own client handle BEFORE deleting the session files, so a
-                // worker mid-refresh can't re-persist them after deletion.
-                worker = None;
-                auth_client = None;
-                // Clear both auth-path session files so the post-logout login
-                // form sees no resumable session regardless of which path
-                // produced this session.
-                let _ = std::fs::remove_file(bsky_auth::SESSION_PATH);
-                let _ = std::fs::remove_file(bsky_oauth::OAUTH_SESSION_PATH);
-                screen_stack.clear();
-                screen_stack.push(Box::new(LoginScreen::idle()));
+                teardown_to_login(&mut worker, &mut auth_client, &mut screen_stack);
             }
         }
+
+        // A resumed (or in-session) token that failed auth — drop the dead
+        // session and return to login. This is the recovery path for an
+        // expired/unrefreshed session that would otherwise strand the user
+        // on a broken screen. Same teardown as an explicit logout.
+        if session_dead {
+            teardown_to_login(&mut worker, &mut auth_client, &mut screen_stack);
+        }
     }
+}
+
+/// Reset to a fresh login: drop the worker (closes its channel → the
+/// thread exits and its `AuthClient` clone, holding the tokens, is freed)
+/// and our own client handle BEFORE deleting the session files, so a
+/// worker mid-refresh can't re-persist them after deletion. Clears both
+/// auth-path session files so the login form sees no resumable session.
+/// `LoginScreen::idle()` shows the form without auto-resuming (avoids a
+/// resume→fail→reset loop). Shared by explicit logout and the
+/// auth-failure fallback.
+fn teardown_to_login(
+    worker: &mut Option<Worker>,
+    auth_client: &mut Option<Arc<AuthClient>>,
+    screen_stack: &mut Vec<Box<dyn Screen>>,
+) {
+    *worker = None;
+    *auth_client = None;
+    let _ = std::fs::remove_file(bsky_auth::SESSION_PATH);
+    let _ = std::fs::remove_file(bsky_oauth::OAUTH_SESSION_PATH);
+    screen_stack.clear();
+    screen_stack.push(Box::new(LoginScreen::idle()));
 }
 
 /// Tab-bar tap handler: walk the stack from the bottom up looking for
