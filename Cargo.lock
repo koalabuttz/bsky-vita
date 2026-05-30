@@ -194,7 +194,7 @@ dependencies = [
 
 [[package]]
 name = "bsky-auth"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "atrium-api",
  "atrium-common",
@@ -212,25 +212,25 @@ dependencies = [
 
 [[package]]
 name = "bsky-ime"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "vitasdk-sys",
 ]
 
 [[package]]
 name = "bsky-input"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "vitasdk-sys",
 ]
 
 [[package]]
 name = "bsky-log"
-version = "0.1.0"
+version = "1.0.0"
 
 [[package]]
 name = "bsky-media"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "bsky-log",
  "vitasdk-sys",
@@ -238,14 +238,14 @@ dependencies = [
 
 [[package]]
 name = "bsky-models"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "atrium-api",
 ]
 
 [[package]]
 name = "bsky-net"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "atrium-xrpc",
  "ureq",
@@ -253,7 +253,7 @@ dependencies = [
 
 [[package]]
 name = "bsky-oauth"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "atrium-api",
  "atrium-common",
@@ -271,7 +271,7 @@ dependencies = [
 
 [[package]]
 name = "bsky-render"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "bsky-log",
  "qrcode",
@@ -280,11 +280,11 @@ dependencies = [
 
 [[package]]
 name = "bsky-store"
-version = "0.1.0"
+version = "1.0.0"
 
 [[package]]
 name = "bsky-ui"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "atrium-api",
  "bsky-auth",
@@ -301,7 +301,7 @@ dependencies = [
 
 [[package]]
 name = "bsky-video"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "bsky-log",
  "vitasdk-sys",
@@ -309,7 +309,7 @@ dependencies = [
 
 [[package]]
 name = "bsky-vita-app"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "atrium-api",
  "bsky-auth",
@@ -332,7 +332,7 @@ dependencies = [
 
 [[package]]
 name = "bsky-worker"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "atrium-api",
  "atrium-xrpc",
