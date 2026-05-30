@@ -1109,7 +1109,7 @@ impl Screen for TimelineScreen {
             // PostCreated belongs to ComposeScreen — if it lands here
             // it's because the user popped out of compose before the
             // response arrived. Drop silently.
-            WorkResponse::PostCreated(_) => {}
+            WorkResponse::PostCreated(_) | WorkResponse::PostDeleted { .. } => {}
             // Like/Repost responses confirm an in-flight optimistic
             // toggle. Phase 4.3 doesn't track which post the response
             // belongs to (no Vec lookup); on Ok(Some(uri)) we walk the

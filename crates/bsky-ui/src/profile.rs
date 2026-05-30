@@ -1498,7 +1498,7 @@ impl Screen for ProfileScreen {
                     self.inflight_banner = None;
                 }
             }
-            WorkResponse::PostCreated(_) => {}
+            WorkResponse::PostCreated(_) | WorkResponse::PostDeleted { .. } => {}
             // Resolve the in-flight PENDING_URI sentinel on any
             // post-shaped tab's post so subsequent un-like / un-repost
             // can extract the real rkey. The same post may live in

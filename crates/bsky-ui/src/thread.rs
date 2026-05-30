@@ -21,6 +21,7 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use atrium_api::app::bsky::feed::defs::{FeedViewPost, FeedViewPostData, PostView};
 use bsky_auth::AuthClient;
@@ -70,6 +71,15 @@ pub struct ThreadScreen {
     /// thread renders with scroll_y = 0, which puts the main post off
     /// the bottom when there are many parents).
     pending_scroll_to_main: bool,
+    /// Two-tap delete confirm (own posts only). `Some(t)` while the first
+    /// SQUARE press is awaiting a confirming second press; auto-disarms
+    /// after 3 s (the stale `Instant` just reads as not-armed).
+    delete_armed_at: Option<Instant>,
+    /// Last delete error to surface in the banner; cleared on re-arm /
+    /// selection change.
+    delete_error: Option<String>,
+    /// Set when a delete succeeds → frame() pops back (the post is gone).
+    just_deleted: bool,
 }
 
 impl ThreadScreen {
@@ -84,7 +94,31 @@ impl ThreadScreen {
             row_heights: Vec::new(),
             inflight_avatars: HashSet::new(),
             pending_scroll_to_main: false,
+            delete_armed_at: None,
+            delete_error: None,
+            just_deleted: false,
         }
+    }
+
+    /// Whether the currently-focused post was authored by the logged-in
+    /// user (gates the delete action). Mirrors the own-DID idiom in
+    /// `conversation.rs`.
+    fn focused_is_own(&self) -> bool {
+        match &self.state {
+            ThreadState::Loaded { posts, .. } => posts
+                .get(self.selected_idx)
+                .map(|p| p.post.author.did.as_str() == self.client.resolved.did.as_str())
+                .unwrap_or(false),
+            _ => false,
+        }
+    }
+
+    /// Whether a delete confirm is currently armed (first SQUARE pressed
+    /// within the last 3 s).
+    fn delete_armed(&self) -> bool {
+        self.delete_armed_at
+            .map(|t| t.elapsed() < Duration::from_secs(3))
+            .unwrap_or(false)
     }
 
     fn focused_reply_target(&self) -> Option<ReplyTarget> {
@@ -124,6 +158,11 @@ impl Screen for ThreadScreen {
         ctx: &crate::widget::UiCtx,
         _ime: &mut Ime,
     ) -> ScreenAction {
+        // A successful delete pops us back to the feed (the post is gone).
+        if self.just_deleted {
+            return ScreenAction::Pop;
+        }
+
         // First-frame fetch.
         if !self.dispatched {
             if let Some(worker) = ctx.worker {
@@ -136,7 +175,12 @@ impl Screen for ThreadScreen {
 
         // Input.
         if ctx.pad.just_pressed(buttons::CIRCLE) {
-            return ScreenAction::Pop;
+            // CIRCLE cancels a pending delete confirm instead of leaving.
+            if self.delete_armed() {
+                self.delete_armed_at = None;
+            } else {
+                return ScreenAction::Pop;
+            }
         }
         let post_count = match &self.state {
             ThreadState::Loaded { posts, .. } => posts.len(),
@@ -154,6 +198,11 @@ impl Screen for ThreadScreen {
                 self.selected_idx += 1;
                 selection_changed = true;
             }
+        }
+        // Moving the focus cancels any pending delete confirm.
+        if selection_changed {
+            self.delete_armed_at = None;
+            self.delete_error = None;
         }
         if ctx.pad.just_pressed(buttons::L1) {
             self.toggle_engagement(ctx, EngagementKind::Like);
@@ -174,6 +223,24 @@ impl Screen for ThreadScreen {
                     Some(reply),
                     handle,
                 )));
+            }
+        }
+        // SQUARE: delete the focused post (own posts only, two-tap confirm).
+        if ctx.pad.just_pressed(buttons::SQUARE) && self.focused_is_own() {
+            if self.delete_armed() {
+                if let Some(worker) = ctx.worker {
+                    if let ThreadState::Loaded { posts, .. } = &self.state {
+                        if let Some(p) = posts.get(self.selected_idx) {
+                            worker.send(WorkRequest::DeletePost {
+                                uri: p.post.uri.clone(),
+                            });
+                        }
+                    }
+                }
+                self.delete_armed_at = None;
+            } else {
+                self.delete_armed_at = Some(Instant::now());
+                self.delete_error = None;
             }
         }
 
@@ -450,16 +517,43 @@ impl Screen for ThreadScreen {
             theme::TEXT_MUTED,
         );
 
+        // Delete confirm / error banner, just below the header.
+        if self.delete_armed() {
+            frame.fill_rect(0.0, HEADER_H as f32, SCREEN_WIDTH as f32, 28.0, theme::ERROR);
+            frame.draw_text(
+                font,
+                12,
+                HEADER_H + 19,
+                theme::TEXT_PRIMARY,
+                0.85,
+                "Delete your post?  SQUARE confirm  ·  CIRCLE cancel",
+            );
+        } else if let Some(err) = &self.delete_error {
+            frame.fill_rect(0.0, HEADER_H as f32, SCREEN_WIDTH as f32, 28.0, theme::ERROR);
+            frame.draw_text(
+                font,
+                12,
+                HEADER_H + 19,
+                theme::TEXT_PRIMARY,
+                0.85,
+                &format!("Delete failed: {err}"),
+            );
+        }
+
         ScreenAction::None
     }
 
     fn control_hints(&self) -> Vec<(&'static str, &'static str)> {
-        vec![
+        let mut v = vec![
             ("R1", "Reply"),
             ("L1", "Like"),
             ("TRIANGLE", "Repost"),
             ("CIRCLE", "Back"),
-        ]
+        ];
+        if self.focused_is_own() {
+            v.push(("SQUARE", "Delete"));
+        }
+        v
     }
 
     fn handle_worker_response(&mut self, resp: WorkResponse) {
@@ -514,8 +608,13 @@ impl Screen for ThreadScreen {
             WorkResponse::Image { url, .. } => {
                 self.inflight_avatars.remove(&url);
             }
-            // Everything else (Profile, FollowChanged, PostCreated,
-            // delete-acks, errors) is not for us.
+            // Delete ack for a post we deleted from this thread.
+            WorkResponse::PostDeleted { result, .. } => match result {
+                Ok(()) => self.just_deleted = true,
+                Err(e) => self.delete_error = Some(e),
+            },
+            // Everything else (Profile, FollowChanged, PostCreated, errors)
+            // is not for us.
             _ => {}
         }
     }

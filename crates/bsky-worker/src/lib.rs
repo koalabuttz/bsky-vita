@@ -161,6 +161,10 @@ pub enum WorkRequest {
     CreateRepost { post_uri: String, post_cid: String },
     /// Delete a repost by record-key.
     DeleteRepost { rkey: String },
+    /// Delete one of the user's own posts. `uri` is the post's AT-URI
+    /// (`at://<did>/app.bsky.feed.post/<rkey>`); the worker extracts the
+    /// rkey and deletes the `app.bsky.feed.post` record from the user's repo.
+    DeletePost { uri: String },
     /// Fetch a post's thread via `app.bsky.feed.getPostThread`. The
     /// `uri` is the AT-URI of any post in the thread; the response
     /// includes parent ancestors (oldest-first), the main post, and
@@ -388,6 +392,12 @@ pub enum WorkResponse {
     /// AT-URI of the just-created post on success; error string on
     /// failure (lexicon validation, network, auth, etc.).
     PostCreated(Result<String, String>),
+    /// Result of a `DeletePost`. `uri` echoes the deleted post's AT-URI so
+    /// the UI can drop the right row; `Ok(())` on success.
+    PostDeleted {
+        uri: String,
+        result: Result<(), String>,
+    },
     /// `Ok(Some(uri))` for CreateLike; `Ok(None)` for DeleteLike;
     /// `Err` for either.
     LikeChanged(Result<Option<String>, String>),
@@ -537,6 +547,9 @@ fn log_if_err(resp: &WorkResponse) {
             bsky_log::log!("worker: Image({url}) err: {e}")
         }
         WorkResponse::PostCreated(Err(e)) => bsky_log::log!("worker: PostCreated err: {e}"),
+        WorkResponse::PostDeleted { uri, result: Err(e) } => {
+            bsky_log::log!("worker: PostDeleted({uri}) err: {e}")
+        }
         WorkResponse::LikeChanged(Err(e)) => bsky_log::log!("worker: LikeChanged err: {e}"),
         WorkResponse::RepostChanged(Err(e)) => {
             bsky_log::log!("worker: RepostChanged err: {e}")
@@ -655,6 +668,7 @@ fn handle_request(
         WorkRequest::DeleteRepost { rkey } => {
             delete_engagement_record(client, "app.bsky.feed.repost", &rkey, false)
         }
+        WorkRequest::DeletePost { uri } => delete_post(client, uri),
         WorkRequest::FetchThread { uri } => fetch_thread(client, uri),
         WorkRequest::CreateFollow { actor_did } => create_follow(client, actor_did),
         WorkRequest::DeleteFollow { rkey } => delete_follow(client, &rkey),
@@ -1418,6 +1432,43 @@ fn delete_follow(client: &AuthClient, rkey_str: &str) -> WorkResponse {
     match agent_call!(client, |a| a.api.com.atproto.repo.delete_record(input.into())) {
         Ok(_) => WorkResponse::FollowChanged(Ok(None)),
         Err(e) => WorkResponse::FollowChanged(Err(format!("{e}"))),
+    }
+}
+
+/// Delete one of the user's own posts (collection `app.bsky.feed.post`).
+/// `uri` is the post's AT-URI; the rkey is its last path segment. `repo`
+/// is the logged-in DID — the server only lets you delete your own records,
+/// so attempting to delete someone else's post would fail server-side
+/// anyway (the UI gates it on author == self).
+fn delete_post(client: &AuthClient, uri: String) -> WorkResponse {
+    // Own `rkey_str` so `uri` stays free to move into the responses below.
+    let rkey_str = uri.rsplit('/').next().unwrap_or("").to_string();
+    let did_str = match agent_call!(client, |a| a.did()) {
+        Some(d) => d.to_string(),
+        None => return WorkResponse::PostDeleted { uri, result: Err("no session DID".into()) },
+    };
+    let repo = match AtIdentifier::from_str(&did_str) {
+        Ok(id) => id,
+        Err(e) => return WorkResponse::PostDeleted { uri, result: Err(format!("DID parse: {e}")) },
+    };
+    let collection = match Nsid::from_str("app.bsky.feed.post") {
+        Ok(n) => n,
+        Err(e) => return WorkResponse::PostDeleted { uri, result: Err(format!("nsid: {e}")) },
+    };
+    let rkey = match RecordKey::from_str(&rkey_str) {
+        Ok(k) => k,
+        Err(e) => return WorkResponse::PostDeleted { uri, result: Err(format!("rkey: {e}")) },
+    };
+    let input = delete_record::InputData {
+        collection,
+        repo,
+        rkey,
+        swap_commit: None,
+        swap_record: None,
+    };
+    match agent_call!(client, |a| a.api.com.atproto.repo.delete_record(input.into())) {
+        Ok(_) => WorkResponse::PostDeleted { uri, result: Ok(()) },
+        Err(e) => WorkResponse::PostDeleted { uri, result: Err(format!("{e}")) },
     }
 }
 

@@ -173,9 +173,8 @@ impl VideoPlayerScreen {
             pw as i32 - pad * 2,
             theme::TEXT_MUTED,
             0.95,
-            "Color video needs the system shader module (libshacccg.suprx), \
-             which isn't installed on this console. Audio and greyscale video \
-             work fine without it.",
+            "Color video couldn't start on this console, so it's playing in \
+             greyscale. Audio and video still work.",
         );
 
         // Checkbox. The hit-rect spans the box + its label so either is
