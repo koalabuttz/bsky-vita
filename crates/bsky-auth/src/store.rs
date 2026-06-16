@@ -29,6 +29,11 @@ use std::sync::Mutex;
 pub struct FileSessionStore {
     path: PathBuf,
     cached: Mutex<Option<AtpSession>>,
+    /// Session generation captured at construction. A logout bumps the global
+    /// generation (see [`bsky_oauth::atomic_json::invalidate_and_delete_sessions`]),
+    /// making this store stale so its writes are refused — preventing a worker
+    /// mid-refresh from resurrecting a just-deleted session.
+    generation: u64,
 }
 
 #[derive(Debug)]
@@ -68,7 +73,8 @@ impl FileSessionStore {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
         let cached = Mutex::new(load_from_disk(&path));
-        Self { path, cached }
+        let generation = bsky_oauth::atomic_json::current_session_generation();
+        Self { path, cached, generation }
     }
 
     /// Has the store been loaded with an existing session? (Cheap read.)
@@ -80,19 +86,24 @@ impl FileSessionStore {
     }
 
     fn write_to_disk(&self, session: &AtpSession) -> Result<(), SessionStoreError> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let bytes = serde_json::to_vec_pretty(session)?;
-        let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, &bytes)?;
-        // Vita's filesystem may not allow atomic rename over an existing file;
-        // be conservative and remove the target first if it exists.
-        if self.path.exists() {
-            std::fs::remove_file(&self.path)?;
-        }
-        std::fs::rename(&tmp, &self.path)?;
-        Ok(())
+        // Gated on the session generation: a logout that bumped it makes this
+        // store stale and the write is skipped (the gate also serializes the
+        // write against the logout delete, so neither can interleave).
+        bsky_oauth::atomic_json::with_session_write_gate(self.generation, || {
+            if let Some(parent) = self.path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let bytes = serde_json::to_vec_pretty(session)?;
+            let tmp = self.path.with_extension("json.tmp");
+            std::fs::write(&tmp, &bytes)?;
+            // Vita's filesystem may not allow atomic rename over an existing
+            // file; be conservative and remove the target first if it exists.
+            if self.path.exists() {
+                std::fs::remove_file(&self.path)?;
+            }
+            std::fs::rename(&tmp, &self.path)?;
+            Ok(())
+        })
     }
 
     fn delete_from_disk(&self) -> Result<(), SessionStoreError> {

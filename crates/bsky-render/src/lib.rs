@@ -1757,6 +1757,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(non_snake_case)]
     fn color_packing_matches_vita2d_RGBA8_macro() {
         // RGBA8(r,g,b,a) = (a<<24) | (b<<16) | (g<<8) | r — host check.
         let c = Color::rgba(0x12, 0x34, 0x56, 0x78);

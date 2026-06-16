@@ -122,10 +122,12 @@ pub struct VideoPlayer {
     /// `true` after we've decoded at least one video frame. Used to
     /// distinguish the warmup window (no frames yet, isActive == 0)
     /// from genuine EOF (frames seen, isActive now 0).
+    #[cfg_attr(not(target_os = "vita"), allow(dead_code))]
     seen_frame: bool,
     /// Diagnostic tick counter — every ~1 second's worth of polls,
     /// log isActive + currentTime so we can see whether decode is
     /// progressing at all.
+    #[cfg_attr(not(target_os = "vita"), allow(dead_code))]
     poll_count: u32,
 }
 
@@ -345,6 +347,7 @@ impl VideoPlayer {
         self.state = PlayerState::Playing;
     }
 
+    #[cfg_attr(not(target_os = "vita"), allow(unused_variables))]
     pub fn jump_to_time_us(&mut self, t: u64) {
         #[cfg(target_os = "vita")]
         unsafe {

@@ -33,6 +33,8 @@
 //! the shared surface to `Arc<dyn HttpClient>` and reconstruct the agent
 //! per-screen.
 
+use std::cell::RefCell;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
@@ -71,11 +73,9 @@ use atrium_api::chat::bsky::convo::{
 };
 use atrium_api::types::string::{AtIdentifier, Datetime, Did, Nsid, RecordKey};
 use atrium_api::types::{LimitedNonZeroU8, LimitedU16, Union, Unknown};
-use atrium_xrpc::http::Request;
-use atrium_xrpc::HttpClient;
 use bsky_auth::{agent_call, AuthClient};
 use bsky_net::VitaHttpClient;
-use crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError};
+use crossbeam_channel::{bounded, unbounded, Receiver, Sender, TryRecvError};
 use futures::executor::block_on;
 
 /// Identifies which feed a `FetchFeed` request targets.
@@ -512,12 +512,29 @@ impl WorkResponse {
     }
 }
 
+/// Upper bound on undrained responses buffered from the worker thread.
+/// Responses can carry image byte vectors, so this caps that memory: the
+/// worker blocks (harmless backpressure on a background thread) if the main
+/// loop ever falls this far behind, rather than letting the queue grow without
+/// limit. The request side stays unbounded — requests are tiny (URLs / rkeys),
+/// the render thread must never block on `send`, and duplicate media requests
+/// are coalesced (see [`Worker::send`]).
+const RESPONSE_CAP: usize = 128;
+
 /// Handle to the worker thread. Holds the channel ends and the thread's
-/// `JoinHandle`. `send` is non-blocking (unbounded channel); `try_recv`
-/// returns `None` if no response is ready yet.
+/// `JoinHandle`. `send` is non-blocking (unbounded request channel); the
+/// response channel is bounded ([`RESPONSE_CAP`]). `try_recv` returns `None`
+/// if no response is ready yet.
 pub struct Worker {
     tx: Sender<WorkRequest>,
     rx: Receiver<WorkResponse>,
+    /// URLs / file paths of in-flight image fetches, so `send` can drop a
+    /// duplicate `FetchImage` / `ReadImageFile` for an asset already being
+    /// loaded (e.g. the same avatar in many rows during a fast scroll). The
+    /// decoded result lands in the shared texture cache keyed by this string,
+    /// so a single fetch satisfies every screen. Cleared when the matching
+    /// `Image` response is drained. Main-thread only, hence `RefCell`.
+    inflight: RefCell<HashSet<String>>,
     _handle: JoinHandle<()>,
 }
 
@@ -527,7 +544,7 @@ impl Worker {
     /// 3.1 only the worker thread holds a clone.
     pub fn spawn(client: Arc<AuthClient>) -> Self {
         let (req_tx, req_rx) = unbounded::<WorkRequest>();
-        let (resp_tx, resp_rx) = unbounded::<WorkResponse>();
+        let (resp_tx, resp_rx) = bounded::<WorkResponse>(RESPONSE_CAP);
 
         let handle = thread::Builder::new()
             .name("bsky-worker".into())
@@ -537,6 +554,7 @@ impl Worker {
         Self {
             tx: req_tx,
             rx: resp_rx,
+            inflight: RefCell::new(HashSet::new()),
             _handle: handle,
         }
     }
@@ -545,6 +563,16 @@ impl Worker {
     /// arrive on a future call to `try_recv` (typically next frame, but
     /// the worker can take many seconds for a network call).
     pub fn send(&self, req: WorkRequest) {
+        // Coalesce duplicate image loads: if an identical fetch for this
+        // URL/path is already in flight, skip it — the pending one populates
+        // the shared texture cache that satisfies every waiting caller. Keyed
+        // on the same string the `Image` response echoes back, so `try_recv`
+        // can clear it.
+        if let Some(key) = image_request_key(&req) {
+            if !self.inflight.borrow_mut().insert(key) {
+                return;
+            }
+        }
         // The worker thread only exits when *we* drop. If `send` errors,
         // the channel's other end is gone, which means the worker is
         // already shutting down — silently drop.
@@ -556,9 +584,28 @@ impl Worker {
     /// in a loop each frame to drain the queue.
     pub fn try_recv(&self) -> Option<WorkResponse> {
         match self.rx.try_recv() {
-            Ok(r) => Some(r),
+            Ok(r) => {
+                // Clear the in-flight marker (success OR error) so a later
+                // load of this asset — after it scrolls off and back, or to
+                // retry a failed fetch — is allowed through again.
+                if let WorkResponse::Image { url, .. } = &r {
+                    self.inflight.borrow_mut().remove(url);
+                }
+                Some(r)
+            }
             Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => None,
         }
+    }
+}
+
+/// The coalescing / echo key for image-bearing requests: `FetchImage`'s URL
+/// and `ReadImageFile`'s path both come back as `WorkResponse::Image.url`, so
+/// one key both dedups the send and clears the marker on receipt.
+fn image_request_key(req: &WorkRequest) -> Option<String> {
+    match req {
+        WorkRequest::FetchImage { url } => Some(url.clone()),
+        WorkRequest::ReadImageFile { path } => Some(path.clone()),
+        _ => None,
     }
 }
 
@@ -1941,66 +1988,49 @@ fn fetch_video_blob(
         cid_str,
     );
     bsky_log::log!("VideoBlob: fetching {url}");
-    // Stream the body, forwarding throttled progress to the UI's
-    // "Loading video…" bar (~every 512 KB, plus the first chunk so the
-    // bar appears promptly). Video blobs can be tens of MB.
-    let mut last_sent: u64 = 0;
-    let bytes = match http.get_with_progress(&url, |downloaded, total| {
-        if last_sent == 0 || downloaded.saturating_sub(last_sent) >= 512 * 1024 {
-            last_sent = downloaded;
-            let _ = responses.send(WorkResponse::VideoBlobProgress {
-                cid: cid_str.clone(),
-                downloaded,
-                total,
-            });
-        }
-    }) {
-        Ok(b) => b,
-        Err(e) => {
-            return WorkResponse::VideoBlob {
-                cid: cid_str,
-                result: Err(e),
-            }
-        }
-    };
-    bsky_log::log!("VideoBlob: fetched {} bytes", bytes.len());
-
     if let Err(e) = std::fs::create_dir_all(&dir) {
         return WorkResponse::VideoBlob {
             cid: cid_str,
             result: Err(format!("mkdir {dir}: {e}")),
         };
     }
-    if let Err(e) = std::fs::write(&path, &bytes) {
+    // Stream straight to disk (a `.part` sidecar, renamed on success) so a
+    // tens-of-MB video never sits whole in RAM, with a hard byte cap as an
+    // OOM backstop. Progress is throttled to ~every 512 KB (plus the first
+    // chunk so the "Loading video…" bar appears promptly) to avoid flooding
+    // the response channel.
+    let mut last_sent: u64 = 0;
+    if let Err(e) = http.download_to_file_with_progress(
+        &url,
+        std::path::Path::new(&path),
+        bsky_net::MAX_VIDEO_BYTES,
+        |downloaded, total| {
+            if last_sent == 0 || downloaded.saturating_sub(last_sent) >= 512 * 1024 {
+                last_sent = downloaded;
+                let _ = responses.send(WorkResponse::VideoBlobProgress {
+                    cid: cid_str.clone(),
+                    downloaded,
+                    total,
+                });
+            }
+        },
+    ) {
         return WorkResponse::VideoBlob {
             cid: cid_str,
-            result: Err(format!("write {path}: {e}")),
+            result: Err(e),
         };
     }
-    bsky_log::log!("VideoBlob cached: {path} ({} bytes)", bytes.len());
+    bsky_log::log!("VideoBlob cached: {path}");
     WorkResponse::VideoBlob {
         cid: cid_str,
         result: Ok(path),
     }
 }
 
-/// GET `url`, return the response body as bytes. Uses a fresh
-/// VitaHttpClient (no auth) — the CDN endpoints (cdn.bsky.app) don't
-/// require Bearer tokens and atrium's session-refresh path would only
-/// add overhead.
+/// GET `url`, return the response body as bytes, capped at
+/// [`bsky_net::MAX_IMAGE_BYTES`] so an oversized or hostile image can't OOM
+/// the device. Uses a fresh VitaHttpClient (no auth) — the CDN endpoints
+/// (cdn.bsky.app) don't require Bearer tokens.
 fn fetch_image_bytes(url: &str) -> Result<Vec<u8>, String> {
-    let http = VitaHttpClient::new();
-    let req = match Request::builder()
-        .method("GET")
-        .uri(url)
-        .body(Vec::<u8>::new())
-    {
-        Ok(r) => r,
-        Err(e) => return Err(format!("invalid request URI: {e}")),
-    };
-    match block_on(http.send_http(req)) {
-        Ok(resp) if resp.status().is_success() => Ok(resp.into_body()),
-        Ok(resp) => Err(format!("HTTP {}", resp.status().as_u16())),
-        Err(e) => Err(format!("{e}")),
-    }
+    VitaHttpClient::new().get_bytes_capped(url, bsky_net::MAX_IMAGE_BYTES)
 }

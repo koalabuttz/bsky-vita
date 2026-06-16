@@ -261,26 +261,34 @@ fn main() {
     }
 }
 
-/// Reset to a fresh login: drop the worker (closes its channel → the
-/// thread exits and its `AuthClient` clone, holding the tokens, is freed)
-/// and our own client handle BEFORE deleting the session files, so a
-/// worker mid-refresh can't re-persist them after deletion. Clears both
-/// auth-path session files so the login form sees no resumable session.
-/// `LoginScreen::idle()` shows the form without auto-resuming (avoids a
-/// resume→fail→reset loop). Shared by explicit logout and the
-/// auth-failure fallback.
+/// Reset to a fresh login. Bumps the session generation and clears both
+/// auth-path session files (+ `.tmp` sidecars) via
+/// [`bsky_oauth::atomic_json::invalidate_and_delete_sessions`] BEFORE dropping
+/// the worker — this, not the drop order, is what stops a worker mid-refresh
+/// from re-persisting (resurrecting) the session: the generation bump makes its
+/// Arc-shared store stale so the pending write is skipped, and the gate
+/// serializes any in-flight write behind the delete. Then drops the worker
+/// (closing its channel → the thread exits after its current request) and our
+/// own client handle. `LoginScreen::idle()` shows the form without
+/// auto-resuming (avoids a resume→fail→reset loop). Shared by explicit logout
+/// and the auth-failure fallback.
 fn teardown_to_login(
     worker: &mut Option<Worker>,
     auth_client: &mut Option<Arc<AuthClient>>,
     screen_stack: &mut Vec<Box<dyn Screen>>,
 ) {
+    // Bump the session generation and delete both session files (+ `.tmp`
+    // sidecars) atomically w.r.t. any in-flight write, BEFORE dropping the
+    // worker. This is what actually prevents a worker mid-refresh from
+    // re-persisting tokens after deletion: the bump makes its Arc-shared store
+    // stale (its pending write is skipped), and a write already in progress is
+    // serialized behind this call, then removed.
+    bsky_oauth::atomic_json::invalidate_and_delete_sessions(&[
+        std::path::Path::new(bsky_auth::SESSION_PATH),
+        std::path::Path::new(bsky_oauth::OAUTH_SESSION_PATH),
+    ]);
     *worker = None;
     *auth_client = None;
-    // Clear both session files AND their `.tmp` sidecars, so a dead/logged-out
-    // session can't be resurrected by the store's `.tmp` recovery next launch.
-    let _ = bsky_oauth::atomic_json::delete_json(std::path::Path::new(bsky_auth::SESSION_PATH));
-    let _ =
-        bsky_oauth::atomic_json::delete_json(std::path::Path::new(bsky_oauth::OAUTH_SESSION_PATH));
     screen_stack.clear();
     screen_stack.push(Box::new(LoginScreen::idle()));
 }

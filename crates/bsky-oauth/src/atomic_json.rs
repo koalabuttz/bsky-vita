@@ -17,6 +17,7 @@
 //! produces a complete `.tmp` before installing, which is all recovery needs.
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use serde::de::DeserializeOwned;
 
@@ -60,6 +61,55 @@ pub fn delete_json(path: &Path) -> std::io::Result<()> {
     let r_main = if path.exists() { std::fs::remove_file(path) } else { Ok(()) };
     let r_tmp = if tmp.exists() { std::fs::remove_file(&tmp) } else { Ok(()) };
     r_main.and(r_tmp)
+}
+
+/// Process-wide session-write gate, holding the current "session generation".
+/// Every session store captures the generation at construction (via
+/// [`current_session_generation`]); a logout bumps it
+/// ([`invalidate_and_delete_sessions`]). A store built before the bump is
+/// stale, so [`with_session_write_gate`] refuses its writes — this is what
+/// stops a worker that is mid-token-refresh during logout from re-persisting
+/// (resurrecting) a session we just deleted. The single `Mutex` also serializes
+/// each write against the delete, closing the check-then-write race.
+static SESSION_GATE: Mutex<u64> = Mutex::new(0);
+
+fn gate() -> std::sync::MutexGuard<'static, u64> {
+    SESSION_GATE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The current session generation. A session store records this when built and
+/// later passes it to [`with_session_write_gate`] on every write.
+pub fn current_session_generation() -> u64 {
+    *gate()
+}
+
+/// Run `write` only if `generation` is still current — i.e. no logout happened
+/// since the store that owns it was built. The gate is held for the duration of
+/// `write`, serializing it against [`invalidate_and_delete_sessions`] so an
+/// in-flight token-refresh write cannot interleave with the logout delete. A
+/// stale generation returns `Ok(())` with the write skipped.
+pub fn with_session_write_gate<E>(
+    generation: u64,
+    write: impl FnOnce() -> Result<(), E>,
+) -> Result<(), E> {
+    let guard = gate();
+    if *guard != generation {
+        return Ok(());
+    }
+    write()
+}
+
+/// Logout / auth-failure teardown: bump the session generation (invalidating
+/// every store built before now) and delete `paths` (each with its `.tmp`
+/// sidecar) — all under the gate, atomically w.r.t. any in-flight write. Call
+/// this BEFORE dropping the worker; a worker mid-refresh then either already
+/// wrote (and is deleted here) or sees the bumped generation and skips.
+pub fn invalidate_and_delete_sessions(paths: &[&Path]) {
+    let mut guard = gate();
+    *guard = guard.wrapping_add(1);
+    for p in paths {
+        let _ = delete_json(p);
+    }
 }
 
 #[cfg(test)]
@@ -137,5 +187,38 @@ mod tests {
         delete_json(&p).unwrap();
         assert!(!p.exists() && !tmp_path(&p).exists());
         assert_eq!(load_json_recovering::<Demo>(&p), None, "no resurrection");
+    }
+
+    #[test]
+    fn session_write_gate_blocks_stale_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("s.json");
+        let g0 = current_session_generation();
+        // Current generation → write runs.
+        with_session_write_gate::<()>(g0, || {
+            write(&p, 1);
+            Ok(())
+        })
+        .unwrap();
+        assert!(p.exists());
+        // Logout: bump generation + delete (atomic w.r.t. writes).
+        invalidate_and_delete_sessions(&[p.as_path()]);
+        assert!(!p.exists());
+        let g1 = current_session_generation();
+        assert_ne!(g0, g1, "generation bumped on invalidate");
+        // A store built before logout (g0) is now stale → its write is skipped.
+        with_session_write_gate::<()>(g0, || {
+            write(&p, 2);
+            Ok(())
+        })
+        .unwrap();
+        assert!(!p.exists(), "stale-generation write must not resurrect the file");
+        // A freshly-built store captures g1 → writes allowed again.
+        with_session_write_gate::<()>(g1, || {
+            write(&p, 3);
+            Ok(())
+        })
+        .unwrap();
+        assert!(p.exists());
     }
 }

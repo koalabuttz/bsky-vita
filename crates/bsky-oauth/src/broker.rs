@@ -13,8 +13,10 @@
 //! ([`PollOutcome::Failed`]) it surfaces a message and returns to the
 //! login form.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::thread;
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -28,6 +30,11 @@ const POLL_DEADLINE_SECS: u64 = 300;
 /// Sleep between successive `/pop` polls. Keeps below KV eventual-
 /// consistency latency (~few seconds) without hammering the Worker.
 const POLL_INTERVAL_SECS: u64 = 2;
+
+/// Granularity of the inter-poll sleep, in milliseconds. The 2 s wait
+/// between polls is split into this many short slices so the cancel flag
+/// is observed within ~one slice instead of up to a full `POLL_INTERVAL_SECS`.
+const POLL_SLEEP_SLICE_MS: u64 = 100;
 
 #[derive(Deserialize)]
 struct BrokerPayload {
@@ -48,20 +55,75 @@ pub enum PollOutcome {
     Failed(String),
 }
 
+/// Handle to a running broker-poll thread.
+///
+/// Drain [`rx`](Self::rx) once per frame for the [`PollOutcome`]. Call
+/// [`cancel`](Self::cancel) to stop polling (e.g. the user backed out of
+/// the QR screen); the [`Drop`] impl also cancels, so simply dropping the
+/// handle is sufficient to tear the thread down.
+pub struct BrokerPoll {
+    /// Receiver the caller drains each frame. The poll thread sends at
+    /// most one terminal [`PollOutcome`] here; on cancellation nothing is
+    /// sent (the thread just exits).
+    pub rx: Receiver<PollOutcome>,
+    /// Shared cancel flag. Set to `true` by [`cancel`](Self::cancel) /
+    /// [`Drop`]; the poll thread checks it before every HTTP request and
+    /// between sleep slices, exiting promptly without sending.
+    cancel: Arc<AtomicBool>,
+    /// Join handle for the poll thread. Held so the thread isn't detached
+    /// at construction; in practice it's left to exit on its own (we only
+    /// set the cancel flag — see `Drop`), so this is never `join`ed on the
+    /// caller's (render) thread, which must never block.
+    #[allow(dead_code)]
+    join: Option<JoinHandle<()>>,
+}
+
+impl BrokerPoll {
+    /// Signal the poll thread to stop. The thread observes the flag within
+    /// ~`POLL_SLEEP_SLICE_MS` (≈100 ms) when waiting between polls and exits
+    /// without sending on `rx`. Idempotent and safe to call from any frame.
+    pub fn cancel(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Drop for BrokerPoll {
+    fn drop(&mut self) {
+        // Dropping the handle cancels: set the flag so a still-running poll
+        // thread exits on its own (within ~one sleep slice, or when an
+        // in-flight 15 s-timeout request returns). We deliberately do NOT
+        // `join` here — this Drop runs on the Vita's render thread, which
+        // must never block; the thread is harmless once the flag is set
+        // (it sends nothing further) and tears itself down in the background.
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
 /// Spawn a background thread that polls `BROKER_POP_URL` with the given
 /// `state` value until a payload arrives, the deadline expires, or a
-/// fatal network error occurs. Returns a receiver the caller drains
-/// once per frame.
+/// fatal network error occurs. Returns a [`BrokerPoll`] handle: drain its
+/// `rx` once per frame for the [`PollOutcome`].
 ///
 /// The thread holds no `AuthClient` and makes only one kind of HTTP
-/// request: `GET {BROKER_POP_URL}?state={state}`. It is cancellable
-/// implicitly by dropping the `Receiver` (the thread's `tx.send` will
-/// fail and the thread will exit on its next loop iteration).
-pub fn spawn_broker_poll(state: String) -> Receiver<PollOutcome> {
+/// request: `GET {BROKER_POP_URL}?state={state}`.
+///
+/// Cancellation is explicit (not implicit via dropping the receiver):
+/// call [`BrokerPoll::cancel`], or drop the whole [`BrokerPoll`] handle
+/// (its `Drop` sets the same flag; it does not join, so dropping never
+/// blocks the render thread — the poll thread tears itself down in the
+/// background). The poll loop checks the flag before every HTTP request and
+/// between short sleep slices, so a cancel is honored within
+/// ~`POLL_SLEEP_SLICE_MS` (≈100 ms) rather than only when the loop next
+/// happens to send. On cancel the thread exits silently — it sends nothing
+/// further on `rx`.
+pub fn spawn_broker_poll(state: String) -> BrokerPoll {
     let (tx, rx) = mpsc::channel();
-    thread::Builder::new()
+    let cancel = Arc::new(AtomicBool::new(false));
+    let thread_cancel = Arc::clone(&cancel);
+    let join = thread::Builder::new()
         .name("bsky-oauth-broker-poll".into())
         .spawn(move || {
+            let cancel = thread_cancel;
             let agent = ureq::AgentBuilder::new()
                 .timeout_connect(Duration::from_secs(15))
                 .timeout(Duration::from_secs(15))
@@ -73,12 +135,24 @@ pub fn spawn_broker_poll(state: String) -> Receiver<PollOutcome> {
             let mut iter = 0u32;
 
             loop {
+                // Re-check cancellation at the top of every deadline loop.
+                if cancel.load(Ordering::Relaxed) {
+                    bsky_log::log!("oauth: poll cancelled after {iter} iters");
+                    return;
+                }
                 if std::time::Instant::now() >= deadline {
                     bsky_log::log!("oauth: poll timed out after {iter} iters");
                     let _ = tx.send(PollOutcome::Timeout);
                     return;
                 }
                 iter += 1;
+                // Check again immediately before the (blocking) HTTP request
+                // so a cancel right after a sleep slice doesn't fire one more
+                // pointless poll at the broker.
+                if cancel.load(Ordering::Relaxed) {
+                    bsky_log::log!("oauth: poll cancelled before request, iter={iter}");
+                    return;
+                }
                 match agent.get(&url).call() {
                     Ok(resp) => {
                         let status = resp.status();
@@ -117,7 +191,14 @@ pub fn spawn_broker_poll(state: String) -> Receiver<PollOutcome> {
                         if iter % 5 == 1 {
                             bsky_log::log!("oauth: poll iter={iter} 404 (waiting)");
                         }
-                        thread::sleep(Duration::from_secs(POLL_INTERVAL_SECS));
+                        // Sleep the poll interval in short slices, checking the
+                        // cancel flag between each, so a dropped/cancelled
+                        // handle is honored within ~POLL_SLEEP_SLICE_MS instead
+                        // of up to the full POLL_INTERVAL_SECS.
+                        if cancellable_sleep(&cancel) {
+                            bsky_log::log!("oauth: poll cancelled during wait, iter={iter}");
+                            return;
+                        }
                         continue;
                     }
                     Err(ureq::Error::Status(code, _)) => {
@@ -136,5 +217,23 @@ pub fn spawn_broker_poll(state: String) -> Receiver<PollOutcome> {
             }
         })
         .expect("spawn bsky-oauth-broker-poll thread");
-    rx
+    BrokerPoll {
+        rx,
+        cancel,
+        join: Some(join),
+    }
+}
+
+/// Sleep `POLL_INTERVAL_SECS` in `POLL_SLEEP_SLICE_MS` slices, checking the
+/// cancel flag between each slice. Returns `true` if cancellation was
+/// observed (caller should exit), `false` if the full interval elapsed.
+fn cancellable_sleep(cancel: &AtomicBool) -> bool {
+    let slices = (POLL_INTERVAL_SECS * 1000) / POLL_SLEEP_SLICE_MS;
+    for _ in 0..slices {
+        if cancel.load(Ordering::Relaxed) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(POLL_SLEEP_SLICE_MS));
+    }
+    cancel.load(Ordering::Relaxed)
 }

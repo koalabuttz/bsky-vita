@@ -22,10 +22,10 @@
 //!   Done(AuthClient) — emit `AuthComplete`
 //! ```
 //!
-//! Cancel during `OAuthAwaiting` drops the poll receiver (the polling
-//! thread exits on its next `send` failure) and returns to Idle.
+//! Cancel during `OAuthAwaiting` calls `BrokerPoll::cancel`, which signals
+//! the polling thread to stop hitting the broker (honored within ~100 ms),
+//! then returns to Idle.
 
-use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
 use bsky_auth::{
@@ -33,6 +33,7 @@ use bsky_auth::{
 };
 use bsky_ime::{Ime, ImeMode, ImeState, TextBoxMode};
 use bsky_input::buttons;
+use bsky_oauth::broker::BrokerPoll;
 use bsky_oauth::{
     spawn_broker_poll, try_resume_existing_oauth_session, OAuthLoginResult, PendingFlow,
     PollOutcome, Transport, VitaOAuthClient,
@@ -90,12 +91,13 @@ enum LoginState {
     _Transitioning,
     /// "Sign in with Bluesky" pressed; `after_present` calls `start_flow`.
     OAuthBeginning,
-    /// QR rendered + broker poll thread running. `poll_rx` taken on success
-    /// before transitioning to OAuthExchanging.
+    /// QR rendered + broker poll thread running. `poll` is drained each
+    /// frame via its `rx`; on success/failure/cancel the thread is told to
+    /// stop (`poll.cancel()`) before transitioning out of this variant.
     OAuthAwaiting {
         auth_url: String,
         qr: Texture,
-        poll_rx: Option<Receiver<PollOutcome>>,
+        poll: BrokerPoll,
     },
     /// Broker delivered the code; `after_present` calls `complete_flow`.
     OAuthExchanging { code: String, iss: String },
@@ -205,24 +207,22 @@ impl Screen for LoginScreen {
         //        Texture) is deferred to `after_present` so the GPU has
         //        finished using the texture for THIS frame's draws.
         //        Otherwise: GPU references freed memory → GPUCRASH. ─────
-        if let LoginState::OAuthAwaiting { poll_rx, .. } = &self.state {
-            if let Some(rx) = poll_rx {
-                match rx.try_recv() {
-                    Ok(PollOutcome::Ready { code, iss }) => {
-                        bsky_log::log!("oauth: login got Ready code_len={} iss={}", code.len(), iss);
-                        self.pending_oauth_ready = Some((code, iss));
-                    }
-                    Ok(PollOutcome::Timeout) => {
-                        bsky_log::log!("oauth: login got Timeout");
-                        self.pending_oauth_failed =
-                            Some("Sign-in timed out — please try again.".into());
-                    }
-                    Ok(PollOutcome::Failed(m)) => {
-                        bsky_log::log!("oauth: login got Failed: {m}");
-                        self.pending_oauth_failed = Some(format!("Broker: {m}"));
-                    }
-                    Err(_) => {}
+        if let LoginState::OAuthAwaiting { poll, .. } = &self.state {
+            match poll.rx.try_recv() {
+                Ok(PollOutcome::Ready { code, iss }) => {
+                    bsky_log::log!("oauth: login got Ready code_len={} iss={}", code.len(), iss);
+                    self.pending_oauth_ready = Some((code, iss));
                 }
+                Ok(PollOutcome::Timeout) => {
+                    bsky_log::log!("oauth: login got Timeout");
+                    self.pending_oauth_failed =
+                        Some("Sign-in timed out — please try again.".into());
+                }
+                Ok(PollOutcome::Failed(m)) => {
+                    bsky_log::log!("oauth: login got Failed: {m}");
+                    self.pending_oauth_failed = Some(format!("Broker: {m}"));
+                }
+                Err(_) => {}
             }
         }
 
@@ -242,15 +242,20 @@ impl Screen for LoginScreen {
         // ─── 4. Render. Branch on whether we're in the OAuth-awaiting
         //        sub-screen (QR view) or the normal form layout. ──────
         match &self.state {
-            LoginState::OAuthAwaiting { auth_url, qr, .. } => {
+            LoginState::OAuthAwaiting { auth_url, qr, poll } => {
                 self.render_oauth_awaiting(frame, font, qr, auth_url);
                 let cancel_clicked =
                     button(frame, font, CANCEL_BTN_RECT, "Cancel", &mut self.cancel_btn, ctx, true);
                 let pad_cancel = ctx.pad.just_pressed(buttons::CIRCLE);
                 if cancel_clicked || pad_cancel {
-                    // Defer the actual state mutation (which drops the QR
-                    // Texture) to `after_present` — see `pending_cancel`
-                    // doc. wait_rendering_done() runs there before the drop.
+                    // Tell the poll thread to stop hitting the broker right
+                    // away (honored within ~100 ms). The actual state mutation
+                    // (which drops the QR Texture *and* the BrokerPoll) is
+                    // deferred to `after_present` — see `pending_cancel` doc;
+                    // wait_rendering_done() runs there before the drop. The
+                    // BrokerPoll's own Drop also cancels + joins, so this
+                    // explicit call is just to stop polling promptly.
+                    poll.cancel();
                     self.pending_cancel = true;
                 }
                 return ScreenAction::None;
@@ -493,13 +498,13 @@ impl Screen for LoginScreen {
                                 return;
                             }
                         };
-                        let poll_rx = spawn_broker_poll(pending.state.clone());
+                        let poll = spawn_broker_poll(pending.state.clone());
                         self.oauth_client = Some(client);
                         self.pending_flow = Some(pending);
                         self.state = LoginState::OAuthAwaiting {
                             auth_url: url,
                             qr,
-                            poll_rx: Some(poll_rx),
+                            poll,
                         };
                     }
                     Err(e) => {

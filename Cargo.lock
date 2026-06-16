@@ -248,6 +248,7 @@ name = "bsky-net"
 version = "1.0.0"
 dependencies = [
  "atrium-xrpc",
+ "tempfile",
  "ureq",
 ]
 

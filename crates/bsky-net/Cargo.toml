@@ -8,3 +8,6 @@ description = "XRPC client over ureq + rustls; atrium HttpClient implementation"
 [dependencies]
 atrium-xrpc = { workspace = true }
 ureq = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

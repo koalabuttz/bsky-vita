@@ -166,7 +166,13 @@ function handleCallbackQr(): Response {
 
 // Vita-side polling endpoint. The Vita polls this with the same `state` it
 // generated locally; on hit it gets the opaque payload and the KV entry is
-// deleted (single-use).
+// deleted. This is BEST-EFFORT single-use: under the Vita's sequential polling
+// (one in-flight `/pop` at a time) the get-then-delete reliably hands the
+// payload out once and 404s thereafter. It is NOT atomically single-use — two
+// concurrent `/pop` requests for the same `state` can both `get` the value
+// before either `delete` runs, so both would receive it. Cloudflare KV has no
+// atomic get-and-delete primitive; a hard single-use guarantee would require
+// serializing pops through a Durable Object (see the delete note below).
 async function handlePop(url: URL, env: Env): Promise<Response> {
   const state = url.searchParams.get("state");
   if (!state || state.length > 256) {
@@ -175,15 +181,23 @@ async function handlePop(url: URL, env: Env): Promise<Response> {
 
   const value = await env.STATE_KV.get(state);
   if (value === null) {
-    // Either nothing has landed yet (Vita polls again in a few seconds) or
-    // it already popped (replay protection).
+    // Either nothing has landed yet (Vita polls again in a few seconds) or it
+    // already popped. Note this is best-effort, not strict replay protection:
+    // because get-then-delete is not atomic, a racing concurrent pop could
+    // still observe the value between this read and the delete below.
     return new Response(null, { status: 404 });
   }
 
-  // Delete-after-read: enforce single-use. We `await` to keep this on the
-  // request critical path — the Vita's next poll should reliably return 404
-  // rather than serving the same code twice during KV's eventual-consistency
-  // window. Cost is one extra KV op; acceptable.
+  // Delete-after-read: best-effort single-use. We `await` to keep this on the
+  // request critical path — under the Vita's sequential polling the next poll
+  // should reliably return 404 rather than serving the same code twice during
+  // KV's eventual-consistency window. Cost is one extra KV op; acceptable.
+  //
+  // Caveat: this read-then-delete is NOT atomic. Two concurrent `/pop`s for the
+  // same `state` can both read `value` before either delete lands, so both
+  // could be served the payload. KV cannot do atomic get-and-delete; if a hard
+  // single-use / replay guarantee is ever required, route pops through a
+  // Durable Object (per-`state` single-threaded execution) instead of KV.
   await env.STATE_KV.delete(state);
 
   return new Response(value, {
