@@ -48,8 +48,12 @@ fn main() {
     };
     render.set_clear_color(bsky_render::theme::BACKGROUND);
     let font = match render.load_inter_ttf("app0:Inter-Regular.ttf") {
-        Ok(f) => f,
+        Ok(f) => {
+            bsky_log::log!("font backend: Inter TTF loaded successfully");
+            f
+        }
         Err(e) => {
+            bsky_log::log!("font backend: Inter TTF load failed ({e}); falling back to PGF");
             eprintln!(
                 "Inter TTF load failed ({e}); falling back to PGF — \
                  add app/static/Inter-Regular.ttf and rebuild for crisp text"
@@ -60,13 +64,14 @@ fn main() {
         }
     };
 
-    let emoji_atlas: Option<EmojiAtlas> = match EmojiAtlas::from_path("app0:twemoji.png") {
-        Ok(a) => Some(a),
+    let emoji_atlas: Option<EmojiAtlas> = match EmojiAtlas::from_path("app0:NotoColorEmoji.ttf") {
+        Ok(a) => {
+            bsky_log::log!("emoji font loaded successfully");
+            Some(a)
+        }
         Err(e) => {
-            eprintln!(
-                "Twemoji atlas load failed ({e}); emoji codepoints will render \
-                 as TTF fallback. Run 'make push-emoji' to upload twemoji.png."
-            );
+            bsky_log::log!("emoji font load failed ({e}); using stable placeholder fallback");
+            eprintln!("Noto Color Emoji load failed ({e}); emoji will use placeholders");
             None
         }
     };
@@ -113,6 +118,9 @@ fn main() {
     let mut hints = HintOverlay::new();
 
     loop {
+        if let Some(atlas) = emoji_atlas.as_ref() {
+            atlas.service_pending(8);
+        }
         let pf = pad.poll();
         let tf = touch.poll();
         let ctx = UiCtx {
@@ -164,11 +172,7 @@ fn main() {
         let mut session_dead = false;
         if let Some(w) = worker.as_ref() {
             while let Some(resp) = w.try_recv() {
-                let resp = if let WorkResponse::Image {
-                    url,
-                    bytes: Ok(b),
-                } = &resp
-                {
+                let resp = if let WorkResponse::Image { url, bytes: Ok(b) } = &resp {
                     if !url.starts_with("http") {
                         // Local file read (picker thumbnail / compose
                         // preview): forward the raw bytes untouched. The
@@ -177,36 +181,36 @@ fn main() {
                         // shared avatar/embed cache.
                         resp
                     } else {
-                    // Avatars are alpha-masked into circles, so they must
-                    // be 4 bpp RGBA. vita2d decodes JPEG to 3 bpp RGB
-                    // (no alpha channel); under the mask that corrupts the
-                    // pixels (the vertical black/red stripe bug). insert_rgba
-                    // forces a 4 bpp copy; other images stay 3 bpp via insert.
-                    let is_avatar = url.contains("/avatar_thumbnail/");
-                    let inserted = if is_avatar {
-                        texture_cache.insert_rgba(url.clone(), b)
-                    } else {
-                        texture_cache.insert(url.clone(), b)
-                    };
-                    match inserted {
-                        Ok(()) => {
-                            // Circular alpha mask so avatars composite
-                            // cleanly over arbitrary backgrounds (banners).
-                            if is_avatar {
-                                if let Some(tex) = texture_cache.get(url) {
-                                    tex.apply_circular_mask();
+                        // Avatars are alpha-masked into circles, so they must
+                        // be 4 bpp RGBA. vita2d decodes JPEG to 3 bpp RGB
+                        // (no alpha channel); under the mask that corrupts the
+                        // pixels (the vertical black/red stripe bug). insert_rgba
+                        // forces a 4 bpp copy; other images stay 3 bpp via insert.
+                        let is_avatar = url.contains("/avatar_thumbnail/");
+                        let inserted = if is_avatar {
+                            texture_cache.insert_rgba(url.clone(), b)
+                        } else {
+                            texture_cache.insert(url.clone(), b)
+                        };
+                        match inserted {
+                            Ok(()) => {
+                                // Circular alpha mask so avatars composite
+                                // cleanly over arbitrary backgrounds (banners).
+                                if is_avatar {
+                                    if let Some(tex) = texture_cache.get(url) {
+                                        tex.apply_circular_mask();
+                                    }
+                                }
+                                resp
+                            }
+                            Err(e) => {
+                                bsky_log::log!("decode failed for {url}: {e}");
+                                WorkResponse::Image {
+                                    url: url.clone(),
+                                    bytes: Err(format!("decode: {e}")),
                                 }
                             }
-                            resp
                         }
-                        Err(e) => {
-                            bsky_log::log!("decode failed for {url}: {e}");
-                            WorkResponse::Image {
-                                url: url.clone(),
-                                bytes: Err(format!("decode: {e}")),
-                            }
-                        }
-                    }
                     }
                 } else {
                     resp
@@ -234,6 +238,7 @@ fn main() {
             }
             ScreenAction::Pop => {
                 if screen_stack.len() > 1 {
+                    bsky_render::wait_rendering_done();
                     screen_stack.pop();
                 }
             }

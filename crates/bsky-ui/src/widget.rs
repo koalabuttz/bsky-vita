@@ -45,9 +45,8 @@ impl Rect {
 /// `Some` for everything that runs after `ScreenAction::AuthComplete`.
 /// Post-auth screens can `unwrap` it; pre-auth screens shouldn't touch it.
 ///
-/// `emoji` is `None` if the Twemoji atlas asset isn't on the device
-/// (`app0:twemoji.png` missing); screens render emoji codepoints as Inter
-/// fallback (tofu) in that case. `Some` when the asset loaded
+/// `emoji` is `None` if the Noto Color Emoji font isn't available; screens
+/// fall back to the regular text font. `Some` when the font loaded
 /// successfully — pass to `Frame::draw_text_*_with_emoji` to render
 /// color emoji inline.
 ///
@@ -88,15 +87,7 @@ pub struct FieldState {
 
 /// Static text. No interaction, no state. Equivalent to a single
 /// `frame.draw_text` but exposed here for parity.
-pub fn label(
-    frame: &mut Frame,
-    font: &Font,
-    x: i32,
-    y: i32,
-    color: Color,
-    scale: f32,
-    text: &str,
-) {
+pub fn label(frame: &mut Frame, font: &Font, x: i32, y: i32, color: Color, scale: f32, text: &str) {
     frame.draw_text(font, x, y, color, scale, text);
 }
 
@@ -114,8 +105,7 @@ pub fn button(
     enabled: bool,
 ) -> bool {
     let pressed_now = ctx.touches.iter().any(|t| rect.contains(t.x, t.y));
-    let clicked =
-        enabled && state.pressed_last && !pressed_now && ctx.touches.is_empty();
+    let clicked = enabled && state.pressed_last && !pressed_now && ctx.touches.is_empty();
     state.pressed_last = pressed_now;
 
     let bg = if pressed_now {
@@ -157,14 +147,20 @@ pub fn text_field(
     enabled: bool,
 ) -> bool {
     let pressed_now = ctx.touches.iter().any(|t| rect.contains(t.x, t.y));
-    let clicked =
-        enabled && state.pressed_last && !pressed_now && ctx.touches.is_empty();
+    let clicked = enabled && state.pressed_last && !pressed_now && ctx.touches.is_empty();
     state.pressed_last = pressed_now;
 
     // Label, drawn above the rect.
     let label_scale = 0.9;
     let label_y = rect.y as i32 - 8;
-    frame.draw_text(font, rect.x as i32, label_y, theme::TEXT_MUTED, label_scale, label_text);
+    frame.draw_text(
+        font,
+        rect.x as i32,
+        label_y,
+        theme::TEXT_MUTED,
+        label_scale,
+        label_text,
+    );
 
     // Field background.
     let bg = if state.focused {
@@ -201,13 +197,7 @@ pub fn text_field(
 /// width with an ellipsis fits in `max_w`. Acceptable performance
 /// because text fields show short values and this only fires when
 /// truncation is actually needed.
-fn truncate_to_width(
-    frame: &Frame,
-    font: &Font,
-    text: &str,
-    scale: f32,
-    max_w: i32,
-) -> String {
+fn truncate_to_width(frame: &Frame, font: &Font, text: &str, scale: f32, max_w: i32) -> String {
     let (full_w, _) = frame.measure_text(font, scale, text);
     if full_w <= max_w {
         return text.to_string();

@@ -822,9 +822,6 @@ impl Screen for ComposeScreen {
                     // instead the ComposeScreen pops itself by storing
                     // a `done: bool` and returning Pop at the start of
                     // the next frame.
-                    self.state = ComposeState::Editing;
-                    self.segments = vec![Segment::default()];
-                    self.current = 0;
                     self.done = true;
                 }
                 Err(msg) => {
@@ -885,4 +882,97 @@ fn button_invisible(
     let clicked = enabled && state.pressed_last && !pressed_now && ctx.touches.is_empty();
     state.pressed_last = pressed_now;
     clicked
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use atrium_api::agent::atp_agent::AtpAgent;
+    use bsky_auth::{AuthAgent, FileSessionStore, PdsClient, ResolvedIdentity};
+    use std::sync::Arc;
+
+    fn test_client() -> Arc<AuthClient> {
+        let agent = AtpAgent::new(
+            PdsClient::new(Arc::new(Default::default()), "https://unused.invalid"),
+            FileSessionStore::new("/unused/compose-test-session.json"),
+        );
+        Arc::new(AuthClient {
+            agent: AuthAgent::Password(agent),
+            resolved: ResolvedIdentity {
+                did: "did:plc:compose-test".to_string(),
+                pds: "https://unused.invalid".to_string(),
+            },
+        })
+    }
+
+    fn attachment() -> Attachment {
+        Attachment {
+            key: "photo.png".to_string(),
+            bytes: Some(vec![1, 2, 3, 4]),
+            mime: "image/png".to_string(),
+            alt: "test photo".to_string(),
+            preview: None,
+        }
+    }
+
+    fn screen() -> ComposeScreen {
+        ComposeScreen::new(test_client(), None, None)
+    }
+
+    fn assert_draft_preserved(screen: &ComposeScreen) {
+        assert_eq!(screen.current, 1);
+        assert_eq!(screen.segments.len(), 2);
+        assert_eq!(screen.segments[0].text, "first segment");
+        assert_eq!(screen.segments[1].text, "second segment");
+        let attachment = &screen.segments[1].attachments[0];
+        assert_eq!(attachment.key, "photo.png");
+        assert_eq!(attachment.bytes.as_deref(), Some(&[1, 2, 3, 4][..]));
+        assert_eq!(attachment.mime, "image/png");
+        assert_eq!(attachment.alt, "test photo");
+        assert!(attachment.preview.is_none());
+    }
+
+    fn populated_screen() -> ComposeScreen {
+        let mut screen = screen();
+        screen.segments[0].text = "first segment".to_string();
+        screen.segments.push(Segment {
+            text: "second segment".to_string(),
+            attachments: vec![attachment()],
+        });
+        screen.current = 1;
+        screen
+    }
+
+    #[test]
+    fn successful_post_preserves_draft_until_pop() {
+        let mut screen = populated_screen();
+        screen.state = ComposeState::Submitting;
+        screen.handle_worker_response(WorkResponse::PostCreated(Ok("at://post".to_string())));
+        assert_draft_preserved(&screen);
+        assert!(screen.done);
+        assert!(!screen.can_post());
+        assert!(matches!(screen.state, ComposeState::Submitting));
+    }
+
+    #[test]
+    fn failed_post_preserves_draft_and_allows_retry() {
+        let mut screen = populated_screen();
+        screen.state = ComposeState::Submitting;
+        screen.handle_worker_response(WorkResponse::PostCreated(Err("network error".to_string())));
+        assert_draft_preserved(&screen);
+        assert!(matches!(screen.state, ComposeState::Error(ref msg) if msg == "network error"));
+        assert!(screen.can_post());
+        assert!(!screen.done);
+    }
+
+    #[test]
+    fn successful_text_only_post_marks_screen_done() {
+        let mut screen = screen();
+        screen.segments[0].text = "text-only post".to_string();
+        screen.state = ComposeState::Submitting;
+        screen.handle_worker_response(WorkResponse::PostCreated(Ok("at://post".to_string())));
+        assert!(screen.done);
+        assert_eq!(screen.segments.len(), 1);
+        assert_eq!(screen.segments[0].text, "text-only post");
+    }
 }

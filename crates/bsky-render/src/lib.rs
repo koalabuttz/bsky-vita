@@ -30,16 +30,15 @@
 
 #![allow(clippy::needless_doctest_main)]
 
+mod emoji_cache;
+mod emoji_font;
+mod emoji_layout;
 #[cfg(target_os = "vita")]
 mod ffi;
 #[cfg(target_os = "vita")]
 mod video_shader;
 #[cfg(target_os = "vita")]
 mod video_shader_src;
-// ATLAS_COLS / ATLAS_ROWS are used by external tooling readers; keep
-// them in the generated file for documentation even if unread by us.
-#[allow(dead_code)]
-mod emoji_table;
 
 /// A YUV420 video frame as three GXM-bindable luma-format textures
 /// (Y at full resolution, U/V at half). Unique to video playback —
@@ -60,17 +59,14 @@ impl YuvTexture {
     pub fn create(_width: u32, _height: u32) -> Result<Self, RenderError> {
         Err(RenderError::NotOnVita)
     }
-    pub fn upload(
-        &mut self,
-        _y: &[u8],
-        _y_pitch: usize,
-        _uv: &[u8],
-        _uv_pitch: usize,
-    ) {
-    }
+    pub fn upload(&mut self, _y: &[u8], _y_pitch: usize, _uv: &[u8], _uv_pitch: usize) {}
     pub fn upload_test_pattern(&self) {}
-    pub fn width(&self) -> u32 { 0 }
-    pub fn height(&self) -> u32 { 0 }
+    pub fn width(&self) -> u32 {
+        0
+    }
+    pub fn height(&self) -> u32 {
+        0
+    }
 }
 
 #[cfg(target_os = "vita")]
@@ -121,7 +117,6 @@ pub fn video_color_supported() -> bool {
     false
 }
 
-
 /// 32-bit RGBA color matching vita2d's `RGBA8` macro layout: alpha in the
 /// MSB, then blue, then green, then red in the LSB. Construct via
 /// [`Color::rgb`] or [`Color::rgba`] for clarity.
@@ -131,12 +126,7 @@ pub struct Color(pub u32);
 
 impl Color {
     pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
-        Self(
-            ((a as u32) << 24)
-                | ((b as u32) << 16)
-                | ((g as u32) << 8)
-                | (r as u32),
-        )
+        Self(((a as u32) << 24) | ((b as u32) << 16) | ((g as u32) << 8) | (r as u32))
     }
 
     pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
@@ -201,7 +191,6 @@ impl core::fmt::Display for RenderError {
 /// rasterized pixels per stroke for clean antialiasing. PGF rendering
 /// ignores this — it uses the float `scale` directly because PGF is a
 /// bitmap font with its own native size.
-#[cfg(target_os = "vita")]
 const BASE_SIZE_PX: u32 = 20;
 
 /// Convert the `scale: f32` carried through the bsky-render API into the
@@ -233,7 +222,9 @@ impl Render {
             if r < 0 {
                 return Err(RenderError::Init(r));
             }
-            Ok(Self { _not_send: PhantomData })
+            Ok(Self {
+                _not_send: PhantomData,
+            })
         }
         #[cfg(not(target_os = "vita"))]
         {
@@ -390,8 +381,8 @@ pub struct Texture {
 /// `0x000000FF` for dark modules, white `0xFFFFFFFF` everywhere else.
 /// Each QR module becomes a `module_px × module_px` solid block.
 fn qr_to_rgba(s: &str, module_px: u32) -> Result<(Vec<u8>, u32), RenderError> {
-    let code = qrcode::QrCode::new(s.as_bytes())
-        .map_err(|e| RenderError::QrEncode(format!("{e}")))?;
+    let code =
+        qrcode::QrCode::new(s.as_bytes()).map_err(|e| RenderError::QrEncode(format!("{e}")))?;
     let modules = code.width(); // matrix side in modules
     let colors = code.to_colors(); // flat row-major; Color::Dark or Color::Light
     const QUIET: usize = 4; // standard spec quiet zone
@@ -415,7 +406,7 @@ fn qr_to_rgba(s: &str, module_px: u32) -> Result<(Vec<u8>, u32), RenderError> {
                     rgba[off] = 0; // R
                     rgba[off + 1] = 0; // G
                     rgba[off + 2] = 0; // B
-                    // alpha stays at 255
+                                       // alpha stays at 255
                 }
             }
         }
@@ -474,7 +465,7 @@ impl Texture {
         }
     }
 
-    /// Load a PNG from a Vita filesystem path (e.g. `app0:twemoji.png`).
+    /// Load a PNG from a Vita filesystem path.
     pub fn from_png_file(path: &str) -> Result<Self, RenderError> {
         #[cfg(target_os = "vita")]
         {
@@ -832,18 +823,11 @@ impl Texture {
     pub fn apply_circular_mask(&self) {}
 
     #[cfg(target_os = "vita")]
-    fn wrap_raw(
-        p: *mut ffi::vita2d_texture,
-        what: &'static str,
-    ) -> Result<Self, RenderError> {
+    fn wrap_raw(p: *mut ffi::vita2d_texture, what: &'static str) -> Result<Self, RenderError> {
         let ptr = NonNull::new(p).ok_or(RenderError::TextureLoad(what))?;
         let width = unsafe { ffi::vita2d_texture_get_width(ptr.as_ptr()) } as i32;
         let height = unsafe { ffi::vita2d_texture_get_height(ptr.as_ptr()) } as i32;
-        Ok(Self {
-            ptr,
-            width,
-            height,
-        })
+        Ok(Self { ptr, width, height })
     }
 }
 
@@ -856,32 +840,370 @@ impl Drop for Texture {
     }
 }
 
-/// Color emoji sprite atlas + codepoint→cell lookup table. Loads
-/// `twemoji.png` (a single PNG with 64×64 cells in a 16-column grid) and
-/// exposes [`EmojiAtlas::lookup`] to find a codepoint's atlas cell.
-///
-/// Construct with [`EmojiAtlas::from_path`] at startup; pass a borrow
-/// through `UiCtx` to screens that render emoji-bearing text.
-pub struct EmojiAtlas {
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+struct EmojiKey {
+    glyph_id: u32,
+    ppem: u32,
+}
+
+struct EmojiEntry {
+    metrics: emoji_font::BitmapMetrics,
+    slot: emoji_cache::Slot,
+}
+
+struct EmojiPage {
     texture: Texture,
+}
+
+const SHAPE_CACHE_ENTRIES: usize = 128;
+const SHAPE_CACHE_BYTES: usize = 128 * 1024;
+const SHAPE_CLUSTER_BYTES: usize = 4096;
+
+type ShapeResult = Option<Vec<emoji_font::Glyph>>;
+
+struct ShapeCache {
+    entries: HashMap<String, ShapeResult>,
+    order: VecDeque<String>,
+    bytes: usize,
+}
+
+impl ShapeCache {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            bytes: 0,
+        }
+    }
+    fn get(&mut self, key: &str) -> Option<ShapeResult> {
+        let value = self.entries.get(key)?.clone();
+        self.order.retain(|entry| entry != key);
+        self.order.push_back(key.to_owned());
+        Some(value)
+    }
+    fn insert(&mut self, key: &str, value: ShapeResult) {
+        if key.len() > SHAPE_CLUSTER_BYTES {
+            return;
+        }
+        if let Some(old) = self.entries.remove(key) {
+            self.bytes -= key.len()
+                + old.as_ref().map_or(0, |glyphs| {
+                    glyphs.len() * std::mem::size_of::<emoji_font::Glyph>()
+                });
+            self.order.retain(|entry| entry != key);
+        }
+        let size = key.len()
+            + value.as_ref().map_or(0, |glyphs| {
+                glyphs.len() * std::mem::size_of::<emoji_font::Glyph>()
+            });
+        if size > SHAPE_CACHE_BYTES {
+            return;
+        }
+        while self.entries.len() >= SHAPE_CACHE_ENTRIES || self.bytes + size > SHAPE_CACHE_BYTES {
+            let Some(old_key) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(old) = self.entries.remove(&old_key) {
+                self.bytes -= old_key.len()
+                    + old.as_ref().map_or(0, |glyphs| {
+                        glyphs.len() * std::mem::size_of::<emoji_font::Glyph>()
+                    });
+            }
+        }
+        self.bytes += size;
+        self.order.push_back(key.to_owned());
+        self.entries.insert(key.to_owned(), value);
+    }
+}
+
+/// Font-backed color emoji renderer with bounded deferred GPU uploads.
+pub struct EmojiAtlas {
+    font: std::cell::RefCell<emoji_font::EmojiFont>,
+    strike_ppem: u32,
+    cache: std::cell::RefCell<HashMap<EmojiKey, EmojiEntry>>,
+    pending: std::cell::RefCell<VecDeque<EmojiKey>>,
+    queued: std::cell::RefCell<std::collections::HashSet<EmojiKey>>,
+    shapes: std::cell::RefCell<ShapeCache>,
+    pages: std::cell::RefCell<Vec<EmojiPage>>,
+    policy: std::cell::RefCell<emoji_cache::Policy>,
+}
+
+impl Drop for EmojiAtlas {
+    fn drop(&mut self) {
+        if !self.pages.get_mut().is_empty() {
+            crate::wait_rendering_done();
+            self.pages.get_mut().clear();
+        }
+    }
 }
 
 impl EmojiAtlas {
     pub fn from_path(path: &str) -> Result<Self, RenderError> {
+        let font = emoji_font::EmojiFont::open(path)
+            .map_err(|_| RenderError::TextureLoad("emoji font"))?;
+        let strike_ppem = font.strike_ppem();
         Ok(Self {
-            texture: Texture::from_png_file(path)?,
+            font: std::cell::RefCell::new(font),
+            strike_ppem,
+            cache: std::cell::RefCell::new(HashMap::new()),
+            pending: std::cell::RefCell::new(VecDeque::new()),
+            queued: std::cell::RefCell::new(std::collections::HashSet::new()),
+            shapes: std::cell::RefCell::new(ShapeCache::new()),
+            pages: std::cell::RefCell::new(Vec::new()),
+            policy: std::cell::RefCell::new(emoji_cache::Policy::new()),
         })
     }
 
-    /// Look up a codepoint's atlas cell. `None` if the codepoint isn't
-    /// in the bundled set; the caller falls back to TTF text rendering.
-    pub fn lookup(&self, codepoint: u32) -> Option<(u16, u16)> {
-        emoji_table::lookup(codepoint)
+    fn target_ppem(&self, scale: f32) -> u32 {
+        ((BASE_SIZE_PX as f32 * scale).round().max(1.0) as u32).clamp(1, 48)
     }
 
-    /// Underlying texture (for direct draw via `Frame::draw_texture_part_scale`).
-    pub fn texture(&self) -> &Texture {
-        &self.texture
+    fn shape(&self, text: &str, scale: f32) -> Option<(Vec<emoji_font::Glyph>, u32)> {
+        let glyphs = self.shaped(text)?;
+        let ppem = self.target_ppem(scale);
+        self.enqueue_glyphs(&glyphs, ppem);
+        Some((glyphs, ppem))
+    }
+
+    fn enqueue_glyphs(&self, glyphs: &[emoji_font::Glyph], ppem: u32) {
+        for glyph in glyphs {
+            if glyph.id == 0 {
+                continue;
+            }
+            let key = EmojiKey {
+                glyph_id: glyph.id,
+                ppem,
+            };
+            if self.cache.borrow().contains_key(&key)
+                || self.queued.borrow().contains(&key)
+                || self.policy.borrow().is_failed(Self::policy_key(key))
+            {
+                continue;
+            }
+            if self.pending.borrow().len() >= emoji_cache::PENDING_LIMIT {
+                continue;
+            }
+            if !self.policy.borrow_mut().queue(Self::policy_key(key)) {
+                continue;
+            }
+            self.pending.borrow_mut().push_back(key);
+            self.queued.borrow_mut().insert(key);
+        }
+    }
+
+    fn shaped_advance(glyphs: &[emoji_font::Glyph], ppem: u32, strike: u32) -> i32 {
+        let units: i64 = glyphs.iter().map(|g| i64::from(g.x_advance_26_6)).sum();
+        ((units * i64::from(ppem) + i64::from(strike * 32)) / (i64::from(strike) * 64)) as i32
+    }
+
+    fn shaped(&self, text: &str) -> Option<Vec<emoji_font::Glyph>> {
+        if text.len() > SHAPE_CLUSTER_BYTES {
+            return None;
+        }
+        if let Some(cached) = self.shapes.borrow_mut().get(text) {
+            return cached;
+        }
+        let result = self.font.borrow_mut().shape(text).ok().filter(|glyphs| {
+            glyphs.len() == 1 && glyphs[0].id != 0 && glyphs[0].x_advance_26_6 > 0
+        });
+        self.shapes.borrow_mut().insert(text, result.clone());
+        result
+    }
+
+    fn measure_sequence(&self, text: &str, scale: f32) -> Option<i32> {
+        let glyphs = self.shaped(text)?;
+        Some(Self::shaped_advance(
+            &glyphs,
+            self.target_ppem(scale),
+            self.strike_ppem,
+        ))
+    }
+
+    fn policy_key(key: EmojiKey) -> u64 {
+        (u64::from(key.glyph_id) << 32) | u64::from(key.ppem)
+    }
+
+    pub fn service_pending(&self, max_uploads: usize) {
+        let mut batch = Vec::new();
+        {
+            let mut pending = self.pending.borrow_mut();
+            for _ in 0..max_uploads.min(emoji_cache::UPLOAD_LIMIT) {
+                if let Some(item) = pending.pop_front() {
+                    batch.push(item);
+                } else {
+                    break;
+                }
+            }
+        }
+        if batch.is_empty() {
+            return;
+        }
+        crate::wait_rendering_done();
+        for key in batch {
+            let _ = self.policy.borrow_mut().pop_queue();
+            let rendered = self.font.borrow_mut().render_rgba(key.glyph_id, key.ppem);
+            let (metrics, pixels) = match rendered {
+                Ok(value)
+                    if value.0.width > 0
+                        && value.0.rows > 0
+                        && value.0.width <= 64
+                        && value.0.rows <= 64 =>
+                {
+                    value
+                }
+                _ => {
+                    self.policy.borrow_mut().fail(Self::policy_key(key));
+                    self.queued.borrow_mut().remove(&key);
+                    continue;
+                }
+            };
+            #[cfg(not(target_os = "vita"))]
+            {
+                let _ = (key, metrics, pixels);
+                self.queued.borrow_mut().remove(&key);
+                continue;
+            }
+            #[cfg(target_os = "vita")]
+            {
+                if self.pages.borrow().is_empty() {
+                    if let Ok(texture) = Texture::new_rgba(512, 512) {
+                        texture.upload_rgba(&vec![0; 512 * 512 * 4]);
+                        self.pages.borrow_mut().push(EmojiPage { texture });
+                    }
+                }
+                if self.pages.borrow().len() < emoji_cache::PAGE_COUNT {
+                    if let Ok(texture) = Texture::new_rgba(512, 512) {
+                        texture.upload_rgba(&vec![0; 512 * 512 * 4]);
+                        self.pages.borrow_mut().push(EmojiPage { texture });
+                    }
+                }
+                if self.pages.borrow().len() != emoji_cache::PAGE_COUNT {
+                    self.policy.borrow_mut().fail(Self::policy_key(key));
+                    self.queued.borrow_mut().remove(&key);
+                    continue;
+                }
+                let slot = self.policy.borrow_mut().allocate(Self::policy_key(key));
+                self.cache
+                    .borrow_mut()
+                    .retain(|_, entry| entry.slot != slot);
+                let x = (slot.slot % 8) * 64;
+                let y = (slot.slot / 8) * 64;
+                let stride = unsafe {
+                    ffi::vita2d_texture_get_stride(
+                        self.pages.borrow()[slot.page].texture.ptr.as_ptr(),
+                    ) as usize
+                };
+                let base = unsafe {
+                    ffi::vita2d_texture_get_datap(
+                        self.pages.borrow()[slot.page].texture.ptr.as_ptr(),
+                    ) as *mut u8
+                };
+                if !base.is_null()
+                    && stride >= 512 * 4
+                    && pixels.len() >= metrics.width as usize * metrics.rows as usize * 4
+                {
+                    unsafe {
+                        for row in 0..64 {
+                            core::ptr::write_bytes(base.add((y + row) * stride + x * 4), 0, 64 * 4);
+                        }
+                        for row in 0..metrics.rows as usize {
+                            core::ptr::copy_nonoverlapping(
+                                pixels.as_ptr().add(row * metrics.width as usize * 4),
+                                base.add((y + row) * stride + x * 4),
+                                metrics.width as usize * 4,
+                            );
+                        }
+                    }
+                    self.cache
+                        .borrow_mut()
+                        .insert(key, EmojiEntry { metrics, slot });
+                } else {
+                    self.policy.borrow_mut().fail(Self::policy_key(key));
+                }
+                self.queued.borrow_mut().remove(&key);
+            }
+        }
+    }
+
+    fn lookup_sequence(&self, sequence: &str) -> Option<()> {
+        let glyphs = self.shaped(sequence)?;
+        if glyphs.is_empty() {
+            return None;
+        }
+        Some(())
+    }
+
+    pub fn lookup(&self, _codepoint: u32) -> Option<(u16, u16)> {
+        None
+    }
+
+    fn draw_sequence(
+        &self,
+        frame: &mut Frame<'_>,
+        sequence: &str,
+        x: i32,
+        y: i32,
+        color: Color,
+        scale: f32,
+    ) -> i32 {
+        let Some((glyphs, ppem)) = self.shape(sequence, scale) else {
+            let width = self.fallback_advance(sequence, scale);
+            frame.fill_rect(
+                x as f32,
+                (y - self.target_ppem(scale) as i32) as f32,
+                width as f32,
+                self.target_ppem(scale) as f32,
+                color,
+            );
+            return x + width;
+        };
+        let advance = Self::shaped_advance(&glyphs, ppem, self.strike_ppem);
+        let mut pen = x;
+        for glyph in glyphs {
+            let key = EmojiKey {
+                glyph_id: glyph.id,
+                ppem,
+            };
+            if let Some(entry) = self.cache.borrow().get(&key) {
+                self.policy.borrow_mut().touch(Self::policy_key(key));
+                let xoff = ((i64::from(glyph.x_offset_26_6) * i64::from(ppem))
+                    / (i64::from(self.strike_ppem) * 64)) as i32;
+                let yoff = ((i64::from(glyph.y_offset_26_6) * i64::from(ppem))
+                    / (i64::from(self.strike_ppem) * 64)) as i32;
+                let page = &self.pages.borrow()[entry.slot.page].texture;
+                let sx = (entry.slot.slot % 8) * 64;
+                let sy = (entry.slot.slot / 8) * 64;
+                frame.draw_texture_part_scale(
+                    page,
+                    (pen + entry.metrics.left + xoff) as f32,
+                    (y - entry.metrics.top - yoff) as f32,
+                    sx as f32,
+                    sy as f32,
+                    entry.metrics.width as f32,
+                    entry.metrics.rows as f32,
+                    1.0,
+                    1.0,
+                );
+            } else {
+                let one =
+                    Self::shaped_advance(std::slice::from_ref(&glyph), ppem, self.strike_ppem)
+                        .max(1);
+                frame.fill_rect(
+                    pen as f32,
+                    (y - ppem as i32) as f32,
+                    one as f32,
+                    ppem as f32,
+                    color,
+                );
+            }
+            pen += Self::shaped_advance(std::slice::from_ref(&glyph), ppem, self.strike_ppem);
+        }
+        x + advance
+    }
+
+    fn fallback_advance(&self, sequence: &str, scale: f32) -> i32 {
+        let _ = sequence;
+        self.target_ppem(scale) as i32
     }
 }
 
@@ -1093,14 +1415,7 @@ impl<'r> Frame<'r> {
             };
             match font {
                 Font::Pgf(p) => unsafe {
-                    ffi::vita2d_pgf_draw_text(
-                        p.as_ptr(),
-                        x,
-                        y,
-                        color.raw(),
-                        scale,
-                        cstr.as_ptr(),
-                    )
+                    ffi::vita2d_pgf_draw_text(p.as_ptr(), x, y, color.raw(), scale, cstr.as_ptr())
                 },
                 Font::Ttf(p) => unsafe {
                     ffi::vita2d_font_draw_text(
@@ -1210,46 +1525,14 @@ impl<'r> Frame<'r> {
         }
         let (_, ref_h) = self.measure_text(font, scale, "Hg");
         let line_h = ref_h + 4;
-        let mut y_cursor = y;
-        for paragraph in text.split('\n') {
-            let mut current = String::new();
-            for word in paragraph.split_whitespace() {
-                let candidate = if current.is_empty() {
-                    word.to_string()
-                } else {
-                    format!("{current} {word}")
-                };
-                if self.measure_text(font, scale, &candidate).0 <= max_w {
-                    current = candidate;
-                    continue;
-                }
-                if !current.is_empty() {
-                    self.draw_text(font, x, y_cursor, color, scale, &current);
-                    y_cursor += line_h;
-                    current.clear();
-                }
-                if self.measure_text(font, scale, word).0 <= max_w {
-                    current = word.to_string();
-                } else {
-                    for ch in word.chars() {
-                        let trial = format!("{current}{ch}");
-                        if self.measure_text(font, scale, &trial).0 > max_w
-                            && !current.is_empty()
-                        {
-                            self.draw_text(font, x, y_cursor, color, scale, &current);
-                            y_cursor += line_h;
-                            current.clear();
-                        }
-                        current.push(ch);
-                    }
-                }
-            }
-            if !current.is_empty() {
-                self.draw_text(font, x, y_cursor, color, scale, &current);
-                y_cursor += line_h;
-            }
+        let space_w = self.measure_text(font, scale, " ").0;
+        let lines = emoji_layout::layout(text, max_w, space_w, |word| {
+            self.measure_text(font, scale, word).0
+        });
+        for (index, line) in lines.iter().enumerate() {
+            self.draw_text(font, x, y + index as i32 * line_h, color, scale, line);
         }
-        y_cursor - y
+        lines.len() as i32 * line_h
     }
 
     /// Measure how tall `text` would be when word-wrapped to `max_w`
@@ -1258,55 +1541,17 @@ impl<'r> Frame<'r> {
     /// culling (e.g. computing post-row heights before deciding which
     /// rows are visible). Mirrors `draw_text_wrapped`'s wrap policy
     /// exactly; if you change one, change both.
-    pub fn measure_text_wrapped(
-        &self,
-        font: &Font,
-        max_w: i32,
-        scale: f32,
-        text: &str,
-    ) -> i32 {
+    pub fn measure_text_wrapped(&self, font: &Font, max_w: i32, scale: f32, text: &str) -> i32 {
         if text.is_empty() {
             return 0;
         }
         let (_, ref_h) = self.measure_text(font, scale, "Hg");
-        let line_h = ref_h + 4;
-        let mut y_cursor = 0;
-        for paragraph in text.split('\n') {
-            let mut current = String::new();
-            for word in paragraph.split_whitespace() {
-                let candidate = if current.is_empty() {
-                    word.to_string()
-                } else {
-                    format!("{current} {word}")
-                };
-                if self.measure_text(font, scale, &candidate).0 <= max_w {
-                    current = candidate;
-                    continue;
-                }
-                if !current.is_empty() {
-                    y_cursor += line_h;
-                    current.clear();
-                }
-                if self.measure_text(font, scale, word).0 <= max_w {
-                    current = word.to_string();
-                } else {
-                    for ch in word.chars() {
-                        let trial = format!("{current}{ch}");
-                        if self.measure_text(font, scale, &trial).0 > max_w
-                            && !current.is_empty()
-                        {
-                            y_cursor += line_h;
-                            current.clear();
-                        }
-                        current.push(ch);
-                    }
-                }
-            }
-            if !current.is_empty() {
-                y_cursor += line_h;
-            }
-        }
-        y_cursor
+        let space_w = self.measure_text(font, scale, " ").0;
+        emoji_layout::layout(text, max_w, space_w, |word| {
+            self.measure_text(font, scale, word).0
+        })
+        .len() as i32
+            * (ref_h + 4)
     }
 
     /// Drive a modal common dialog (e.g. sceImeDialog) for one frame.
@@ -1452,6 +1697,72 @@ impl<'r> Frame<'r> {
     // forcing a break. Emoji width contributes to the running line
     // width as `BASE_SIZE_PX * scale` pixels.
 
+    /// Measure one line using the same font and atlas advances as drawing.
+    pub fn measure_text_with_emoji(
+        &self,
+        font: &Font,
+        scale: f32,
+        text: &str,
+        emoji: Option<&EmojiAtlas>,
+    ) -> (i32, i32) {
+        let Some(atlas) = emoji else {
+            let width: i32 = emoji_layout::tokens(text, |_| false)
+                .into_iter()
+                .map(|token| match token {
+                    emoji_layout::Token::Text(run) => {
+                        self.measure_text(font, scale, &emoji_layout::text_run(run))
+                            .0
+                    }
+                    emoji_layout::Token::Emoji(_) | emoji_layout::Token::Fallback(_) => {
+                        self.emoji_render_size(scale)
+                    }
+                })
+                .sum();
+            return (width, self.measure_text(font, scale, "Hg").1);
+        };
+        let mut width = 0;
+        for token in emoji_layout::tokens(text, |g| atlas.lookup_sequence(g).is_some()) {
+            match token {
+                emoji_layout::Token::Text(run) => {
+                    width += self.measure_text(font, scale, &emoji_layout::text_run(run)).0
+                },
+                emoji_layout::Token::Emoji(sequence) => {
+                    width += atlas
+                        .measure_sequence(sequence, scale)
+                        .unwrap_or_else(|| atlas.fallback_advance(sequence, scale))
+                }
+                emoji_layout::Token::Fallback(sequence) => {
+                    width += atlas.fallback_advance(sequence, scale)
+                }
+            }
+        }
+        let height = self.measure_text(font, scale, "Hg").1;
+        (width, height)
+    }
+
+    /// Keep the longest character-boundary prefix that fits with an ellipsis.
+    pub fn truncate_text_with_emoji(
+        &self,
+        font: &Font,
+        scale: f32,
+        text: &str,
+        max_w: i32,
+        emoji: Option<&EmojiAtlas>,
+    ) -> String {
+        if self.measure_text_with_emoji(font, scale, text, emoji).0 <= max_w {
+            return text.to_string();
+        }
+        if self.measure_text_with_emoji(font, scale, "…", emoji).0 > max_w {
+            return String::new();
+        }
+        let end = emoji_layout::truncated_prefix_end(text, |prefix| {
+            self.measure_text_with_emoji(font, scale, &format!("{prefix}…"), emoji)
+                .0
+                <= max_w
+        });
+        format!("{}…", &text[..end])
+    }
+
     /// Single-line emoji-aware draw. Returns the next-x position past
     /// the last drawn glyph or emoji.
     pub fn draw_text_with_emoji(
@@ -1465,7 +1776,32 @@ impl<'r> Frame<'r> {
         emoji: Option<&EmojiAtlas>,
     ) -> i32 {
         match emoji {
-            None => self.draw_text(font, x, y, color, scale, text),
+            None => {
+                let size = self.emoji_render_size(scale);
+                let mut current_x = x;
+                for token in emoji_layout::tokens(text, |_| false) {
+                    match token {
+                        emoji_layout::Token::Text(run) => {
+                            let run = emoji_layout::text_run(run);
+                            self.draw_text(font, current_x, y, color, scale, &run);
+                            current_x += self.measure_text(font, scale, &run).0;
+                        }
+                        emoji_layout::Token::Emoji(sequence)
+                        | emoji_layout::Token::Fallback(sequence) => {
+                            self.fill_rect(
+                                current_x as f32,
+                                (y - size) as f32,
+                                size as f32,
+                                size as f32,
+                                color,
+                            );
+                            current_x += size;
+                            let _ = sequence;
+                        }
+                    }
+                }
+                current_x
+            }
             Some(atlas) => self.draw_word_with_emoji(font, x, y, color, scale, text, atlas),
         }
     }
@@ -1485,49 +1821,49 @@ impl<'r> Frame<'r> {
         emoji: Option<&EmojiAtlas>,
     ) -> i32 {
         let Some(atlas) = emoji else {
-            return self.draw_text_wrapped(font, x, y, max_w, color, scale, text);
+            if text.is_empty() {
+                return 0;
+            }
+            let (_, ref_h) = self.measure_text(font, scale, "Hg");
+            let lines =
+                emoji_layout::layout(text, max_w, self.measure_text(font, scale, " ").0, |word| {
+                    self.measure_text_with_emoji(font, scale, word, None).0
+                });
+            for (index, line) in lines.iter().enumerate() {
+                self.draw_text_with_emoji(
+                    font,
+                    x,
+                    y + index as i32 * (ref_h + 4),
+                    color,
+                    scale,
+                    line,
+                    None,
+                );
+            }
+            return lines.len() as i32 * (ref_h + 4);
         };
+
         if text.is_empty() {
             return 0;
         }
         let (_, ref_h) = self.measure_text(font, scale, "Hg");
         let line_h = ref_h + 4;
         let space_w = self.measure_text(font, scale, " ").0;
-        let mut y_cursor = y;
-
-        for paragraph in text.split('\n') {
-            let mut line_words: Vec<&str> = Vec::new();
-            let mut line_width: i32 = 0;
-            for word in paragraph.split_whitespace() {
-                let w = self.measure_word_with_emoji(font, scale, word, atlas);
-                let needed = if line_words.is_empty() {
-                    w
-                } else {
-                    space_w + w
-                };
-                if line_width + needed <= max_w {
-                    line_words.push(word);
-                    line_width += needed;
-                    continue;
-                }
-                // Doesn't fit on the current line. Flush, start new line.
-                if !line_words.is_empty() {
-                    self.draw_words_with_emoji(
-                        font, x, y_cursor, color, scale, &line_words, space_w, atlas,
-                    );
-                    y_cursor += line_h;
-                }
-                line_words = vec![word];
-                line_width = w;
-            }
-            if !line_words.is_empty() {
-                self.draw_words_with_emoji(
-                    font, x, y_cursor, color, scale, &line_words, space_w, atlas,
-                );
-                y_cursor += line_h;
-            }
+        let lines = emoji_layout::layout(text, max_w, space_w, |word| {
+            self.measure_word_with_emoji(font, scale, word, atlas)
+        });
+        for (index, line) in lines.iter().enumerate() {
+            self.draw_word_with_emoji(
+                font,
+                x,
+                y + index as i32 * line_h,
+                color,
+                scale,
+                line,
+                atlas,
+            );
         }
-        y_cursor - y
+        lines.len() as i32 * line_h
     }
 
     /// Measurement-only counterpart to `draw_text_wrapped_with_emoji`.
@@ -1540,7 +1876,15 @@ impl<'r> Frame<'r> {
         emoji: Option<&EmojiAtlas>,
     ) -> i32 {
         let Some(atlas) = emoji else {
-            return self.measure_text_wrapped(font, max_w, scale, text);
+            if text.is_empty() {
+                return 0;
+            }
+            let (_, ref_h) = self.measure_text(font, scale, "Hg");
+            let lines =
+                emoji_layout::layout(text, max_w, self.measure_text(font, scale, " ").0, |word| {
+                    self.measure_text_with_emoji(font, scale, word, None).0
+                });
+            return lines.len() as i32 * (ref_h + 4);
         };
         if text.is_empty() {
             return 0;
@@ -1548,33 +1892,14 @@ impl<'r> Frame<'r> {
         let (_, ref_h) = self.measure_text(font, scale, "Hg");
         let line_h = ref_h + 4;
         let space_w = self.measure_text(font, scale, " ").0;
-        let mut y_cursor = 0;
-        for paragraph in text.split('\n') {
-            let mut line_width: i32 = 0;
-            let mut has_words = false;
-            for word in paragraph.split_whitespace() {
-                let w = self.measure_word_with_emoji(font, scale, word, atlas);
-                let needed = if !has_words { w } else { space_w + w };
-                if line_width + needed <= max_w {
-                    line_width += needed;
-                    has_words = true;
-                } else {
-                    if has_words {
-                        y_cursor += line_h;
-                    }
-                    line_width = w;
-                    has_words = true;
-                }
-            }
-            if has_words {
-                y_cursor += line_h;
-            }
-        }
-        y_cursor
+        let lines = emoji_layout::layout(text, max_w, space_w, |word| {
+            self.measure_word_with_emoji(font, scale, word, atlas)
+        });
+        lines.len() as i32 * line_h
     }
 
-    /// Max line width actually used when wrapping `text` to `max_w`
-    /// (≤ `max_w`). Companion to `measure_text_wrapped_with_emoji`, for
+    /// Max line width actually used when wrapping `text` to `max_w`.
+    /// Companion to `measure_text_wrapped_with_emoji`, for
     /// shrink-to-fit layouts like chat bubbles. Mirrors the same greedy
     /// word-wrap; falls back to plain `measure_text` per word when no
     /// emoji atlas is supplied.
@@ -1591,6 +1916,29 @@ impl<'r> Frame<'r> {
         }
         let space_w = self.measure_text(font, scale, " ").0;
         let mut max_used = 0;
+        if emoji.is_none() {
+            for line in emoji_layout::layout(text, max_w, space_w, |word| {
+                self.measure_text_with_emoji(font, scale, word, None).0
+            }) {
+                max_used = max_used.max(self.measure_text_with_emoji(font, scale, &line, None).0);
+            }
+            return max_used;
+        }
+        if let Some(atlas) = emoji {
+            for line in emoji_layout::layout(text, max_w, space_w, |word| {
+                self.measure_word_with_emoji(font, scale, word, atlas)
+            }) {
+                let mut width = 0;
+                for (index, word) in line.split(' ').enumerate() {
+                    if index > 0 {
+                        width += space_w;
+                    }
+                    width += self.measure_word_with_emoji(font, scale, word, atlas);
+                }
+                max_used = max_used.max(width);
+            }
+            return max_used;
+        }
         for paragraph in text.split('\n') {
             let mut line_width: i32 = 0;
             let mut has_words = false;
@@ -1611,7 +1959,7 @@ impl<'r> Frame<'r> {
             }
             max_used = max_used.max(line_width);
         }
-        max_used.min(max_w)
+        max_used
     }
 
     // ─── Private helpers for emoji-aware rendering ────────────────
@@ -1626,24 +1974,19 @@ impl<'r> Frame<'r> {
         word: &str,
         atlas: &EmojiAtlas,
     ) -> i32 {
-        let emoji_w = self.emoji_render_size(scale);
-        let mut total: i32 = 0;
-        let mut text_buf = String::new();
-        for ch in word.chars() {
-            if atlas.lookup(ch as u32).is_some() {
-                if !text_buf.is_empty() {
-                    total += self.measure_text(font, scale, &text_buf).0;
-                    text_buf.clear();
+        emoji_layout::tokens(word, |g| atlas.lookup_sequence(g).is_some())
+            .into_iter()
+            .map(|token| match token {
+                emoji_layout::Token::Text(run) => {
+                    self.measure_text(font, scale, &emoji_layout::text_run(run))
+                        .0
                 }
-                total += emoji_w;
-            } else {
-                text_buf.push(ch);
-            }
-        }
-        if !text_buf.is_empty() {
-            total += self.measure_text(font, scale, &text_buf).0;
-        }
-        total
+                emoji_layout::Token::Emoji(sequence) => atlas
+                    .measure_sequence(sequence, scale)
+                    .unwrap_or_else(|| atlas.fallback_advance(sequence, scale)),
+                emoji_layout::Token::Fallback(sequence) => atlas.fallback_advance(sequence, scale),
+            })
+            .sum()
     }
 
     /// Draw one mixed-emoji-and-text word at `(x, y)`. Returns the
@@ -1664,63 +2007,32 @@ impl<'r> Frame<'r> {
         word: &str,
         atlas: &EmojiAtlas,
     ) -> i32 {
-        let emoji_w = self.emoji_render_size(scale);
-        let cell = emoji_table::CELL_PX as f32;
-        let scale_factor = emoji_w as f32 / cell;
-        let emoji_y_top = y - emoji_w; // baseline at y → bottom of emoji at y
-
         let mut current_x = x;
-        let mut text_buf = String::new();
-        for ch in word.chars() {
-            if let Some((col, row)) = atlas.lookup(ch as u32) {
-                if !text_buf.is_empty() {
-                    self.draw_text(font, current_x, y, color, scale, &text_buf);
-                    current_x += self.measure_text(font, scale, &text_buf).0;
-                    text_buf.clear();
+        for token in emoji_layout::tokens(word, |g| atlas.lookup_sequence(g).is_some()) {
+            match token {
+                emoji_layout::Token::Text(run) => {
+                    let run = emoji_layout::text_run(run);
+                    self.draw_text(font, current_x, y, color, scale, &run);
+                    current_x += self.measure_text(font, scale, &run).0;
                 }
-                self.draw_texture_part_scale(
-                    atlas.texture(),
-                    current_x as f32,
-                    emoji_y_top as f32,
-                    col as f32 * cell,
-                    row as f32 * cell,
-                    cell,
-                    cell,
-                    scale_factor,
-                    scale_factor,
-                );
-                current_x += emoji_w;
-            } else {
-                text_buf.push(ch);
+                emoji_layout::Token::Emoji(sequence) => {
+                    let next = atlas.draw_sequence(self, sequence, current_x, y, color, scale);
+                    current_x = next;
+                }
+                emoji_layout::Token::Fallback(sequence) => {
+                    let width = atlas.fallback_advance(sequence, scale);
+                    self.fill_rect(
+                        current_x as f32,
+                        (y - atlas.target_ppem(scale) as i32) as f32,
+                        width as f32,
+                        atlas.target_ppem(scale) as f32,
+                        color,
+                    );
+                    current_x += width;
+                }
             }
-        }
-        if !text_buf.is_empty() {
-            self.draw_text(font, current_x, y, color, scale, &text_buf);
-            current_x += self.measure_text(font, scale, &text_buf).0;
         }
         current_x
-    }
-
-    /// Draw a sequence of words (separated by `space_w`) on one line at
-    /// `(x, y)`. Used by `draw_text_wrapped_with_emoji`.
-    fn draw_words_with_emoji(
-        &mut self,
-        font: &Font,
-        x: i32,
-        y: i32,
-        color: Color,
-        scale: f32,
-        words: &[&str],
-        space_w: i32,
-        atlas: &EmojiAtlas,
-    ) {
-        let mut current_x = x;
-        for (i, word) in words.iter().enumerate() {
-            if i > 0 {
-                current_x += space_w;
-            }
-            current_x = self.draw_word_with_emoji(font, current_x, y, color, scale, word, atlas);
-        }
     }
 
     /// Compute the on-screen rendered size (width and height) of an
@@ -1806,7 +2118,9 @@ mod tests {
         // Corner (in the quiet zone) must be white.
         assert_eq!(rgba[0..4], [0xFF, 0xFF, 0xFF, 0xFF]);
         // Buffer must contain at least one black pixel somewhere.
-        let has_black = rgba.chunks_exact(4).any(|p| p[0] == 0 && p[1] == 0 && p[2] == 0);
+        let has_black = rgba
+            .chunks_exact(4)
+            .any(|p| p[0] == 0 && p[1] == 0 && p[2] == 0);
         assert!(has_black, "no dark module rendered");
     }
 

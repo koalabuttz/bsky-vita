@@ -27,9 +27,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use atrium_api::app::bsky::feed::defs::{
-    FeedViewPost, FeedViewPostReasonRefs, ReplyRefParentRefs,
-};
+use atrium_api::app::bsky::feed::defs::{FeedViewPost, FeedViewPostReasonRefs, ReplyRefParentRefs};
 use atrium_api::types::{TryFromUnknown, Union, Unknown};
 use bsky_auth::AuthClient;
 use bsky_ime::Ime;
@@ -226,15 +224,23 @@ impl TimelineScreen {
     /// change stays — user will see the real state on next refresh.
     fn toggle_like(&mut self, ctx: &UiCtx) {
         let Some(worker) = ctx.worker else { return };
-        let TimelineState::Loaded { posts, .. } = &mut self.state else { return };
-        let Some(post) = posts.get_mut(self.selected_idx) else { return };
+        let TimelineState::Loaded { posts, .. } = &mut self.state else {
+            return;
+        };
+        let Some(post) = posts.get_mut(self.selected_idx) else {
+            return;
+        };
         toggle_engagement(post, worker, EngagementKind::Like);
     }
 
     fn toggle_repost(&mut self, ctx: &UiCtx) {
         let Some(worker) = ctx.worker else { return };
-        let TimelineState::Loaded { posts, .. } = &mut self.state else { return };
-        let Some(post) = posts.get_mut(self.selected_idx) else { return };
+        let TimelineState::Loaded { posts, .. } = &mut self.state else {
+            return;
+        };
+        let Some(post) = posts.get_mut(self.selected_idx) else {
+            return;
+        };
         toggle_engagement(post, worker, EngagementKind::Repost);
     }
 
@@ -360,10 +366,9 @@ pub(crate) fn detect_post_tap_action(
     if touches.iter().any(|&(x, y)| reposts_rect.contains(x, y)) {
         return Some(TapAction::ToggleRepost(idx));
     }
-    if let Some(target) = crate::embeds::video_in_embed(
-        post.post.embed.as_ref(),
-        post.post.author.did.as_ref(),
-    ) {
+    if let Some(target) =
+        crate::embeds::video_in_embed(post.post.embed.as_ref(), post.post.author.did.as_ref())
+    {
         if let Some((ey, eh)) = crate::embeds::embed_rect(frame, font, post, content_y, emoji) {
             let er = Rect::new(
                 TEXT_LEFT as f32,
@@ -390,7 +395,9 @@ pub(crate) fn detect_post_tap_action(
         }
     }
     // Image embed → open the tapped image in the full-screen viewer.
-    if let Some((images, rects)) = crate::embeds::image_tap_cells(frame, font, post, content_y, emoji) {
+    if let Some((images, rects)) =
+        crate::embeds::image_tap_cells(frame, font, post, content_y, emoji)
+    {
         for (i, &(rx, ry, rw, rh)) in rects.iter().enumerate() {
             if touches
                 .iter()
@@ -473,7 +480,9 @@ pub(crate) fn toggle_engagement(
             // for after the create response arrives).
             return;
         }
-        let Some(rkey) = existing_uri.rsplit('/').next().map(String::from) else { return };
+        let Some(rkey) = existing_uri.rsplit('/').next().map(String::from) else {
+            return;
+        };
         match kind {
             EngagementKind::Like => worker.send(WorkRequest::DeleteLike { rkey }),
             EngagementKind::Repost => worker.send(WorkRequest::DeleteRepost { rkey }),
@@ -482,14 +491,8 @@ pub(crate) fn toggle_engagement(
         // Was idle; now engaging.
         *count = Some(count.unwrap_or(0) + 1);
         match kind {
-            EngagementKind::Like => worker.send(WorkRequest::CreateLike {
-                post_uri,
-                post_cid,
-            }),
-            EngagementKind::Repost => worker.send(WorkRequest::CreateRepost {
-                post_uri,
-                post_cid,
-            }),
+            EngagementKind::Like => worker.send(WorkRequest::CreateLike { post_uri, post_cid }),
+            EngagementKind::Repost => worker.send(WorkRequest::CreateRepost { post_uri, post_cid }),
         }
     }
 }
@@ -632,8 +635,7 @@ impl Screen for TimelineScreen {
             } else if row_top < view_top + SCROLL_MARGIN {
                 self.scroll_y = (row_top - SCROLL_MARGIN).max(0) as f32;
             } else if row_top + row_h > view_bottom - SCROLL_MARGIN {
-                self.scroll_y =
-                    (row_top + row_h + SCROLL_MARGIN - VIEWPORT_H).max(0) as f32;
+                self.scroll_y = (row_top + row_h + SCROLL_MARGIN - VIEWPORT_H).max(0) as f32;
             }
         }
         if self.scroll_y < 0.0 {
@@ -689,9 +691,7 @@ impl Screen for TimelineScreen {
                         // Embed image URLs (post images, link card thumb,
                         // video thumb, quote-author avatar). These are
                         // already CDN-resolved JPEGs.
-                        for url in
-                            crate::embeds::embed_image_urls(post.post.embed.as_ref())
-                        {
+                        for url in crate::embeds::embed_image_urls(post.post.embed.as_ref()) {
                             if !ctx.texture_cache.contains(&url)
                                 && !self.inflight_avatars.contains(&url)
                             {
@@ -710,9 +710,7 @@ impl Screen for TimelineScreen {
             for pin in self.saved_feeds.iter() {
                 if let Some(url) = pin.avatar_url.as_ref() {
                     let url = avatar_thumbnail_jpeg(url);
-                    if !ctx.texture_cache.contains(&url)
-                        && !self.inflight_avatars.contains(&url)
-                    {
+                    if !ctx.texture_cache.contains(&url) && !self.inflight_avatars.contains(&url) {
                         worker.send(WorkRequest::FetchImage { url: url.clone() });
                         self.inflight_avatars.insert(url);
                     }
@@ -817,7 +815,13 @@ impl Screen for TimelineScreen {
         // ─── 8. Sticky header (drawn after pill row so it covers any
         //        pill content that exceeds its bounds). ──────────────────
         let header_label = self.header_label().to_string();
-        frame.fill_rect(0.0, 0.0, SCREEN_WIDTH as f32, HEADER_H as f32, theme::FIELD_BG);
+        frame.fill_rect(
+            0.0,
+            0.0,
+            SCREEN_WIDTH as f32,
+            HEADER_H as f32,
+            theme::FIELD_BG,
+        );
         frame.draw_text_centered(font, 26, theme::TEXT_PRIMARY, 1.1, &header_label);
         frame.fill_rect(
             0.0,
@@ -867,9 +871,7 @@ impl Screen for TimelineScreen {
             let mut tap_action: Option<TapAction> = None;
             if let TimelineState::Loaded { posts, .. } = &self.state {
                 let mut y_probe = VIEWPORT_TOP - self.scroll_y as i32;
-                for (idx, (post, &row_h)) in
-                    posts.iter().zip(self.row_heights.iter()).enumerate()
-                {
+                for (idx, (post, &row_h)) in posts.iter().zip(self.row_heights.iter()).enumerate() {
                     let row_bottom = y_probe + row_h;
                     if row_bottom > VIEWPORT_TOP && y_probe < VIEWPORT_BOTTOM {
                         // Feed rows always show repost/reply context, so
@@ -898,16 +900,13 @@ impl Screen for TimelineScreen {
                         let counts_h = 24.0;
                         // Roughly partition the bottom row into three:
                         // likes 0..280, reposts 280..560, replies 560..840.
-                        let likes_rect =
-                            Rect::new(0.0, counts_y as f32, 280.0, counts_h);
-                        let reposts_rect =
-                            Rect::new(280.0, counts_y as f32, 280.0, counts_h);
+                        let likes_rect = Rect::new(0.0, counts_y as f32, 280.0, counts_h);
+                        let reposts_rect = Rect::new(280.0, counts_y as f32, 280.0, counts_h);
                         if touches.iter().any(|&(x, y)| likes_rect.contains(x, y)) {
                             tap_action = Some(TapAction::ToggleLike(idx));
                             break;
                         }
-                        if touches.iter().any(|&(x, y)| reposts_rect.contains(x, y))
-                        {
+                        if touches.iter().any(|&(x, y)| reposts_rect.contains(x, y)) {
                             tap_action = Some(TapAction::ToggleRepost(idx));
                             break;
                         }
@@ -948,8 +947,7 @@ impl Screen for TimelineScreen {
                                     (SCREEN_WIDTH - TEXT_LEFT - ROW_PAD_X) as f32,
                                     eh as f32,
                                 );
-                                if touches.iter().any(|&(x, y)| embed_rect.contains(x, y))
-                                {
+                                if touches.iter().any(|&(x, y)| embed_rect.contains(x, y)) {
                                     tap_action = Some(TapAction::OpenThread(quote_uri));
                                     break;
                                 }
@@ -1013,11 +1011,13 @@ impl Screen for TimelineScreen {
                     self.selected_idx = prev_sel;
                 }
                 Some(TapAction::OpenVideo(target)) => {
-                    return ScreenAction::Push(Box::new(crate::video_player::VideoPlayerScreen::new(
-                        Arc::clone(&self.client),
-                        target.did,
-                        target.cid,
-                    )));
+                    return ScreenAction::Push(Box::new(
+                        crate::video_player::VideoPlayerScreen::new(
+                            Arc::clone(&self.client),
+                            target.did,
+                            target.cid,
+                        ),
+                    ));
                 }
                 Some(TapAction::OpenImage { images, index }) => {
                     return ScreenAction::Push(Box::new(
@@ -1032,7 +1032,11 @@ impl Screen for TimelineScreen {
     }
 
     fn top_level(&self) -> Option<TopLevel> {
-        if self.is_pushed { None } else { Some(TopLevel::Home) }
+        if self.is_pushed {
+            None
+        } else {
+            Some(TopLevel::Home)
+        }
     }
 
     fn control_hints(&self) -> Vec<(&'static str, &'static str)> {
@@ -1083,7 +1087,8 @@ impl Screen for TimelineScreen {
             // Saved feeds populate the pill row.
             WorkResponse::SavedFeeds(Ok(b)) => {
                 self.pill_buttons.clear();
-                self.pill_buttons.resize_with(b.pins.len(), ButtonState::default);
+                self.pill_buttons
+                    .resize_with(b.pins.len(), ButtonState::default);
                 self.saved_feeds = b.pins;
             }
             WorkResponse::SavedFeeds(Err(e)) => {
@@ -1241,8 +1246,7 @@ pub(crate) fn measure_post_row(
     } else {
         BODY_GAP
     };
-    let text_block_h =
-        ROW_PAD_Y + TOP_LINE_H + body_h + embed_h + bottom_gap + FOOTER_H;
+    let text_block_h = ROW_PAD_Y + TOP_LINE_H + body_h + embed_h + bottom_gap + FOOTER_H;
     // Ensure the row is at least as tall as the avatar slot.
     let avatar_block_h = ROW_PAD_Y + AVATAR_SIZE + FOOTER_H;
     // The repost/reply context line (if any) sits above everything.
@@ -1295,7 +1299,8 @@ fn draw_pill_row(
     for (idx, pin) in pins.iter().enumerate() {
         let active = pin.source == *current;
         let label_scale = 0.95;
-        let (tw, _) = frame.measure_text(font, label_scale, &pin.display_name);
+        let (tw, _) =
+            frame.measure_text_with_emoji(font, label_scale, &pin.display_name, ctx.emoji);
         let has_avatar = pin.avatar_url.is_some();
         let inner_pad_l = if has_avatar { 6 + avatar_size + 6 } else { 12 };
         let pill_w = inner_pad_l + tw + 12;
@@ -1311,7 +1316,13 @@ fn draw_pill_row(
             theme::TEXT_MUTED
         };
 
-        frame.fill_rect(cx as f32, pill_y as f32, pill_w as f32, pill_h as f32, bg_color);
+        frame.fill_rect(
+            cx as f32,
+            pill_y as f32,
+            pill_w as f32,
+            pill_h as f32,
+            bg_color,
+        );
         if has_avatar {
             let avatar_x = cx + 6;
             let avatar_y = pill_y + 4;
@@ -1334,20 +1345,22 @@ fn draw_pill_row(
         }
         let text_x = cx + inner_pad_l;
         let text_y = pill_y + (pill_h + 18) / 2 - 4;
-        frame.draw_text(font, text_x, text_y, text_color, label_scale, &pin.display_name);
+        frame.draw_text_with_emoji(
+            font,
+            text_x,
+            text_y,
+            text_color,
+            label_scale,
+            &pin.display_name,
+            ctx.emoji,
+        );
 
         // Hit-test only if pill is on-screen.
         if cx + pill_w <= SCREEN_WIDTH && idx < pill_buttons.len() {
-            let pill_rect = Rect::new(
-                cx as f32,
-                pill_y as f32,
-                pill_w as f32,
-                pill_h as f32,
-            );
+            let pill_rect = Rect::new(cx as f32, pill_y as f32, pill_w as f32, pill_h as f32);
             let state = &mut pill_buttons[idx];
             let pressed_now = ctx.touches.iter().any(|t| pill_rect.contains(t.x, t.y));
-            let just_clicked =
-                state.pressed_last && !pressed_now && ctx.touches.is_empty();
+            let just_clicked = state.pressed_last && !pressed_now && ctx.touches.is_empty();
             state.pressed_last = pressed_now;
             if just_clicked && !active {
                 clicked = Some(idx);
@@ -1423,7 +1436,11 @@ pub(crate) fn draw_post_row(
     // of the row (avatar, name, body, embed, counts) shifts down by ctx_h.
     // body_y/counts_y derive from top_y, so shifting top_y cascades them.
     let context_label = post_context_label(post, show_context);
-    let ctx_h = if context_label.is_some() { CONTEXT_LINE_H } else { 0 };
+    let ctx_h = if context_label.is_some() {
+        CONTEXT_LINE_H
+    } else {
+        0
+    };
     let content_top = y_top + ctx_h;
 
     // Selection highlight: faint background tint over the row + 3 px
@@ -1438,13 +1455,7 @@ pub(crate) fn draw_post_row(
             row_h as f32,
             theme::FIELD_BG,
         );
-        frame.fill_rect(
-            0.0,
-            y_top as f32,
-            3.0,
-            row_h as f32,
-            theme::ACCENT,
-        );
+        frame.fill_rect(0.0, y_top as f32, 3.0, row_h as f32, theme::ACCENT);
     }
 
     // Context line ("Reposted by X" / "Reply to @y") in the top band.
@@ -1489,11 +1500,20 @@ pub(crate) fn draw_post_row(
         .filter(|s| !s.is_empty())
         .unwrap_or(handle_str);
     let top_y = content_top + ROW_PAD_Y;
-    frame.draw_text(font, inner_left, top_y, theme::TEXT_PRIMARY, 1.0, display);
-
     let handle = format!("@{handle_str}");
     let (hw, _) = frame.measure_text(font, 0.85, &handle);
     let hx = row_right - ROW_PAD_X - hw;
+    let name_max_w = (hx - inner_left - 8).max(0);
+    let display = frame.truncate_text_with_emoji(font, 1.0, display, name_max_w, emoji);
+    frame.draw_text_with_emoji(
+        font,
+        inner_left,
+        top_y,
+        theme::TEXT_PRIMARY,
+        1.0,
+        &display,
+        emoji,
+    );
     frame.draw_text(font, hx, top_y + 4, theme::TEXT_MUTED, 0.85, &handle);
 
     // Body text (wrapped, emoji-aware).
@@ -1511,24 +1531,23 @@ pub(crate) fn draw_post_row(
     );
 
     // Embed block (images / link card / quote / video thumb) below body.
-    let embed_consumed_h =
-        if let Some(embed) = post.post.embed.as_ref() {
-            let block = crate::embeds::measure_embed_block(frame, font, Some(embed), emoji);
-            if block > 0 {
-                crate::embeds::draw_embed_block(
-                    frame,
-                    font,
-                    embed,
-                    inner_left,
-                    body_y + body_h + crate::embeds::EMBED_GAP,
-                    cache,
-                    emoji,
-                );
-            }
-            block
-        } else {
-            0
-        };
+    let embed_consumed_h = if let Some(embed) = post.post.embed.as_ref() {
+        let block = crate::embeds::measure_embed_block(frame, font, Some(embed), emoji);
+        if block > 0 {
+            crate::embeds::draw_embed_block(
+                frame,
+                font,
+                embed,
+                inner_left,
+                body_y + body_h + crate::embeds::EMBED_GAP,
+                cache,
+                emoji,
+            );
+        }
+        block
+    } else {
+        0
+    };
 
     // Counts row, three segments rendered in sequence with per-segment
     // color reflecting the viewer's engagement state. Liked / reposted
@@ -1563,12 +1582,20 @@ pub(crate) fn draw_post_row(
     // (measure_text — chained draw_text return values aren't reliable
     // for next-x; same caveat as draw_word_with_emoji).
     let mut cx = inner_left;
-    let likes_color = if liked { theme::ACCENT } else { theme::TEXT_MUTED };
+    let likes_color = if liked {
+        theme::ACCENT
+    } else {
+        theme::TEXT_MUTED
+    };
     frame.draw_text(font, cx, counts_y, likes_color, scale, &likes_str);
     cx += frame.measure_text(font, scale, &likes_str).0;
     frame.draw_text(font, cx, counts_y, theme::TEXT_MUTED, scale, sep_str);
     cx += frame.measure_text(font, scale, sep_str).0;
-    let reposts_color = if reposted { theme::ACCENT } else { theme::TEXT_MUTED };
+    let reposts_color = if reposted {
+        theme::ACCENT
+    } else {
+        theme::TEXT_MUTED
+    };
     frame.draw_text(font, cx, counts_y, reposts_color, scale, &reposts_str);
     cx += frame.measure_text(font, scale, &reposts_str).0;
     frame.draw_text(font, cx, counts_y, theme::TEXT_MUTED, scale, sep_str);
@@ -1588,7 +1615,9 @@ pub(crate) fn draw_post_row(
 /// placeholder if we observe it in the wild.
 pub(crate) fn extract_post_text(record: &Unknown) -> Option<String> {
     use atrium_api::app::bsky::feed::post::RecordData;
-    RecordData::try_from_unknown(record.clone()).ok().map(|r| r.text)
+    RecordData::try_from_unknown(record.clone())
+        .ok()
+        .map(|r| r.text)
 }
 
 /// Render an avatar at `(x, y, size, size)`. Cache hit → scaled

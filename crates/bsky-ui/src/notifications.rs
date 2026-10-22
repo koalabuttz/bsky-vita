@@ -120,9 +120,7 @@ impl Screen for NotificationsScreen {
             _ => 0,
         };
         let mut selection_changed = false;
-        if count > 0
-            && (ctx.pad.just_pressed(buttons::UP) || ctx.pad.just_pressed(buttons::DOWN))
-        {
+        if count > 0 && (ctx.pad.just_pressed(buttons::UP) || ctx.pad.just_pressed(buttons::DOWN)) {
             if ctx.pad.just_pressed(buttons::UP) && self.selected_idx > 0 {
                 self.selected_idx -= 1;
                 selection_changed = true;
@@ -154,8 +152,7 @@ impl Screen for NotificationsScreen {
             if row_top < view_top + SCROLL_MARGIN {
                 self.scroll_y = (row_top - SCROLL_MARGIN).max(0) as f32;
             } else if row_top + row_h > view_bottom - SCROLL_MARGIN {
-                self.scroll_y =
-                    (row_top + row_h + SCROLL_MARGIN - VIEWPORT_H).max(0) as f32;
+                self.scroll_y = (row_top + row_h + SCROLL_MARGIN - VIEWPORT_H).max(0) as f32;
             }
         }
         let stick_y = ctx.pad.left_stick.1;
@@ -192,8 +189,7 @@ impl Screen for NotificationsScreen {
         if let NotifState::Loaded { notifications, .. } = &self.state {
             if let Some(worker) = ctx.worker {
                 let mut y_probe = HEADER_H - self.scroll_y as i32;
-                for (notif, &row_h) in notifications.iter().zip(self.row_heights.iter())
-                {
+                for (notif, &row_h) in notifications.iter().zip(self.row_heights.iter()) {
                     let row_bottom = y_probe + row_h;
                     if row_bottom > VIEWPORT_TOP && y_probe < VIEWPORT_BOTTOM {
                         if let Some(url) = notif.author.avatar.as_ref() {
@@ -233,8 +229,10 @@ impl Screen for NotificationsScreen {
                     );
                 } else {
                     let mut y = HEADER_H - self.scroll_y as i32;
-                    for (i, (notif, &row_h)) in
-                        notifications.iter().zip(self.row_heights.iter()).enumerate()
+                    for (i, (notif, &row_h)) in notifications
+                        .iter()
+                        .zip(self.row_heights.iter())
+                        .enumerate()
                     {
                         let row_bottom = y + row_h;
                         if row_bottom > VIEWPORT_TOP && y < VIEWPORT_BOTTOM {
@@ -271,7 +269,13 @@ impl Screen for NotificationsScreen {
         }
 
         // Sticky header.
-        frame.fill_rect(0.0, 0.0, SCREEN_WIDTH as f32, HEADER_H as f32, theme::FIELD_BG);
+        frame.fill_rect(
+            0.0,
+            0.0,
+            SCREEN_WIDTH as f32,
+            HEADER_H as f32,
+            theme::FIELD_BG,
+        );
         frame.draw_text_centered(font, 26, theme::TEXT_PRIMARY, 1.1, "Notifications");
         frame.fill_rect(
             0.0,
@@ -303,16 +307,11 @@ impl Screen for NotificationsScreen {
             let mut tap_target: Option<NotifTapAction> = None;
             if let NotifState::Loaded { notifications, .. } = &self.state {
                 let mut y_probe = HEADER_H - self.scroll_y as i32;
-                for (notif, &row_h) in notifications.iter().zip(self.row_heights.iter())
-                {
+                for (notif, &row_h) in notifications.iter().zip(self.row_heights.iter()) {
                     let row_bottom = y_probe + row_h;
                     if row_bottom > VIEWPORT_TOP && y_probe < VIEWPORT_BOTTOM {
-                        let avatar_rect = Rect::new(
-                            0.0,
-                            y_probe as f32,
-                            ROW_TEXT_LEFT as f32,
-                            row_h as f32,
-                        );
+                        let avatar_rect =
+                            Rect::new(0.0, y_probe as f32, ROW_TEXT_LEFT as f32, row_h as f32);
                         let rest_rect = Rect::new(
                             ROW_TEXT_LEFT as f32,
                             y_probe as f32,
@@ -436,13 +435,7 @@ fn draw_notif_row(
         );
     }
     if is_selected {
-        frame.fill_rect(
-            0.0,
-            y_top as f32,
-            3.0,
-            row_h as f32,
-            theme::ACCENT,
-        );
+        frame.fill_rect(0.0, y_top as f32, 3.0, row_h as f32, theme::ACCENT);
     }
 
     // Avatar (40×40).
@@ -453,11 +446,7 @@ fn draw_notif_row(
     } else {
         ctx.avatar_mask
     };
-    let url_thumb = notif
-        .author
-        .avatar
-        .as_deref()
-        .map(avatar_thumbnail_jpeg);
+    let url_thumb = notif.author.avatar.as_deref().map(avatar_thumbnail_jpeg);
     let painted_real = match url_thumb.as_deref() {
         Some(url) => match ctx.texture_cache.get(url) {
             Some(tex) => {
@@ -482,13 +471,7 @@ fn draw_notif_row(
     if let Some(mask_tex) = mask {
         let sx = NOTIF_AVATAR_SIZE as f32 / mask_tex.width().max(1) as f32;
         let sy = NOTIF_AVATAR_SIZE as f32 / mask_tex.height().max(1) as f32;
-        frame.draw_texture_scale(
-            mask_tex,
-            avatar_x as f32,
-            avatar_y as f32,
-            sx,
-            sy,
-        );
+        frame.draw_texture_scale(mask_tex, avatar_x as f32, avatar_y as f32, sx, sy);
     }
 
     // Headline + optional snippet.
@@ -508,13 +491,21 @@ fn draw_notif_row(
         other => format!("{display} ({other})"),
     };
     let text_y = y_top + ROW_PAD_Y + 16;
-    frame.draw_text(
+    let headline = frame.truncate_text_with_emoji(
+        font,
+        1.0,
+        &headline,
+        SCREEN_WIDTH - ROW_TEXT_LEFT - 12,
+        ctx.emoji,
+    );
+    frame.draw_text_with_emoji(
         font,
         ROW_TEXT_LEFT,
         text_y,
         theme::TEXT_PRIMARY,
         1.0,
         &headline,
+        ctx.emoji,
     );
 
     // Snippet for mentions / replies / quotes: the post text.
@@ -523,15 +514,22 @@ fn draw_notif_row(
         _ => None,
     };
     if let Some(text) = snippet {
-        let head: String = text.chars().take(80).collect();
+        let head = frame.truncate_text_with_emoji(
+            font,
+            0.85,
+            &text,
+            SCREEN_WIDTH - ROW_TEXT_LEFT - 12,
+            ctx.emoji,
+        );
         let snippet_y = text_y + 22;
-        frame.draw_text(
+        frame.draw_text_with_emoji(
             font,
             ROW_TEXT_LEFT,
             snippet_y,
             theme::TEXT_MUTED,
             0.85,
             &head,
+            ctx.emoji,
         );
     }
 

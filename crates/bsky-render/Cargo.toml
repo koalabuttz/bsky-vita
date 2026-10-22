@@ -6,6 +6,9 @@ license.workspace = true
 description = "vita2d FFI wrapper, frame primitives, font (PGF) rendering — Vita-only"
 build = "build.rs"
 
+[build-dependencies]
+cc = "1"
+
 # vitasdk-sys is only pulled when targeting Vita. On host, this crate
 # compiles to empty stubs — its tests aren't useful but the workspace
 # still builds without VITASDK present.
@@ -15,6 +18,8 @@ bsky-log = { path = "../bsky-log" }
 # `image` + `svg` + `pic` features we don't need (we render to a flat
 # RGBA buffer via `to_vec()` directly).
 qrcode = { workspace = true }
+unicode-segmentation = { workspace = true }
+unicode-properties = { version = "0.1.4", features = ["emoji"] }
 
 [target.'cfg(target_os = "vita")'.dependencies]
 vitasdk-sys = { workspace = true }

@@ -46,7 +46,10 @@ enum ListState {
         convos: Vec<ConvoView>,
         next_cursor: Option<String>,
     },
-    Error { msg: String, auth_scope: bool },
+    Error {
+        msg: String,
+        auth_scope: bool,
+    },
 }
 
 pub struct ConversationListScreen {
@@ -102,9 +105,7 @@ impl Screen for ConversationListScreen {
             _ => 0,
         };
         let mut selection_changed = false;
-        if count > 0
-            && (ctx.pad.just_pressed(buttons::UP) || ctx.pad.just_pressed(buttons::DOWN))
-        {
+        if count > 0 && (ctx.pad.just_pressed(buttons::UP) || ctx.pad.just_pressed(buttons::DOWN)) {
             if ctx.pad.just_pressed(buttons::UP) && self.selected_idx > 0 {
                 self.selected_idx -= 1;
                 selection_changed = true;
@@ -134,8 +135,7 @@ impl Screen for ConversationListScreen {
             if row_top < view_top + SCROLL_MARGIN {
                 self.scroll_y = (row_top - SCROLL_MARGIN).max(0) as f32;
             } else if row_top + row_h > view_bottom - SCROLL_MARGIN {
-                self.scroll_y =
-                    (row_top + row_h + SCROLL_MARGIN - VIEWPORT_H).max(0) as f32;
+                self.scroll_y = (row_top + row_h + SCROLL_MARGIN - VIEWPORT_H).max(0) as f32;
             }
         }
         let stick_y = ctx.pad.left_stick.1;
@@ -250,7 +250,13 @@ impl Screen for ConversationListScreen {
         }
 
         // Sticky header.
-        frame.fill_rect(0.0, 0.0, SCREEN_WIDTH as f32, HEADER_H as f32, theme::FIELD_BG);
+        frame.fill_rect(
+            0.0,
+            0.0,
+            SCREEN_WIDTH as f32,
+            HEADER_H as f32,
+            theme::FIELD_BG,
+        );
         frame.draw_text_centered(font, 26, theme::TEXT_PRIMARY, 1.1, "Messages");
         frame.fill_rect(
             0.0,
@@ -304,12 +310,14 @@ impl Screen for ConversationListScreen {
             }
             if let Some(tap) = tap {
                 return match tap {
-                    ListTap::Profile(handle) => ScreenAction::Push(Box::new(
-                        ProfileScreen::new(Arc::clone(&self.client), Some(handle)),
-                    )),
-                    ListTap::Open(convo) => ScreenAction::Push(Box::new(
-                        ConversationScreen::new(Arc::clone(&self.client), convo),
-                    )),
+                    ListTap::Profile(handle) => ScreenAction::Push(Box::new(ProfileScreen::new(
+                        Arc::clone(&self.client),
+                        Some(handle),
+                    ))),
+                    ListTap::Open(convo) => ScreenAction::Push(Box::new(ConversationScreen::new(
+                        Arc::clone(&self.client),
+                        convo,
+                    ))),
                 };
             }
         }
@@ -400,9 +408,7 @@ fn convo_title(convo: &ConvoView, own_did: &str) -> String {
 /// Snippet of the conversation's last message for the row's second line.
 fn last_message_snippet(convo: &ConvoView) -> String {
     match convo.last_message.as_ref() {
-        Some(Union::Refs(ConvoViewLastMessageRefs::MessageView(m))) => {
-            m.text.chars().take(80).collect()
-        }
+        Some(Union::Refs(ConvoViewLastMessageRefs::MessageView(m))) => m.text.clone(),
         Some(Union::Refs(ConvoViewLastMessageRefs::DeletedMessageView(_))) => {
             "(message deleted)".to_string()
         }
@@ -477,7 +483,15 @@ fn draw_convo_row(
     // Title + snippet.
     let title = convo_title(convo, own_did);
     let text_y = y_top + ROW_PAD_Y + 16;
-    frame.draw_text(font, ROW_TEXT_LEFT, text_y, theme::TEXT_PRIMARY, 1.0, &title);
+    frame.draw_text_with_emoji(
+        font,
+        ROW_TEXT_LEFT,
+        text_y,
+        theme::TEXT_PRIMARY,
+        1.0,
+        &title,
+        ctx.emoji,
+    );
     let snippet = last_message_snippet(convo);
     if !snippet.is_empty() {
         let color = if unread {
@@ -485,7 +499,22 @@ fn draw_convo_row(
         } else {
             theme::TEXT_MUTED
         };
-        frame.draw_text(font, ROW_TEXT_LEFT, text_y + 22, color, 0.85, &snippet);
+        let snippet = frame.truncate_text_with_emoji(
+            font,
+            0.85,
+            &snippet,
+            SCREEN_WIDTH - ROW_TEXT_LEFT - 12,
+            ctx.emoji,
+        );
+        frame.draw_text_with_emoji(
+            font,
+            ROW_TEXT_LEFT,
+            text_y + 22,
+            color,
+            0.85,
+            &snippet,
+            ctx.emoji,
+        );
     }
 
     // Separator.
@@ -501,15 +530,7 @@ fn draw_convo_row(
 /// Center-draw a wrapped error/detail line under a title.
 fn draw_wrapped_centered(frame: &mut Frame, font: &Font, y: i32, text: &str) {
     let max_w = SCREEN_WIDTH - 80;
-    frame.draw_text_wrapped(
-        font,
-        40,
-        y,
-        max_w,
-        theme::TEXT_MUTED,
-        0.85,
-        text,
-    );
+    frame.draw_text_wrapped(font, 40, y, max_w, theme::TEXT_MUTED, 0.85, text);
 }
 
 /// Subtle ACCENT-tinted background for unread rows (mirrors notifications).

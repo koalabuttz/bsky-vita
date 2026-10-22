@@ -15,7 +15,7 @@ help:
 	@echo "  run-fast     Same as run, but with dev profile (~5x faster build)"
 	@echo "  push-creds   Upload local credentials.toml to ux0:/data/$(TITLE_ID)/credentials.toml"
 	@echo "  push-font    Upload app/static/Inter-Regular.ttf to ux0:/app/$(TITLE_ID)/ (one-shot)"
-	@echo "  push-emoji   Upload app/static/twemoji.png to ux0:/app/$(TITLE_ID)/ (one-shot, ~2.5 MB)"
+	@echo "  push-emoji   Upload NotoColorEmoji.ttf and its license to ux0:/app/$(TITLE_ID)/ (~10.2 MiB)"
 	@echo "  push-mask    Upload app/static/avatar_mask_96.png to ux0:/app/$(TITLE_ID)/ (one-shot, ~500 B)"
 	@echo "  push-gxp     Upload app/static/video_yuv_{v,f}.gxp to ux0:/app/$(TITLE_ID)/ (one-shot)"
 	@echo "  fetch-log    Pull ux0:data/$(TITLE_ID)/run.log via vitacompanion FTP"
@@ -95,21 +95,21 @@ push-font:
 		"ftp://$$VITA_IP:1337/ux0:/app/$(TITLE_ID)/Inter-Regular.ttf"
 	@echo "Inter-Regular.ttf pushed."
 
-# Push the Twemoji color-emoji atlas (~2.5 MB). Required once before the
-# app first reads `app0:twemoji.png`. Vitacompanion's FTP can be flaky on
-# big files (550 'Could not allocate memory') — if it fails, try again or
-# destroy the running app first to free memory.
+# Push the Noto Color Emoji font and its OFL license. Required once before
+# the app first reads either file from app0:. This target transfers assets only.
 push-emoji:
 	@if [ -z "$$VITA_IP" ]; then echo "VITA_IP env var not set"; exit 1; fi
-	@if [ ! -f app/static/twemoji.png ]; then \
-		echo "app/static/twemoji.png not found."; \
-		echo "Run 'python tools/build-twemoji.py' to generate it."; \
+	@if [ ! -f app/static/NotoColorEmoji.ttf ] || [ ! -f app/static/NotoColorEmoji-LICENSE.txt ]; then \
+		echo "Noto Color Emoji font or license missing from app/static/."; \
 		exit 1; \
 	fi
-	curl -sS --connect-timeout 5 --max-time 120 \
-		-T app/static/twemoji.png \
-		"ftp://$$VITA_IP:1337/ux0:/app/$(TITLE_ID)/twemoji.png"
-	@echo "twemoji.png pushed."
+	curl -sS --connect-timeout 5 --max-time 180 \
+		-T app/static/NotoColorEmoji.ttf \
+		"ftp://$$VITA_IP:1337/ux0:/app/$(TITLE_ID)/NotoColorEmoji.ttf"
+	curl -sS --connect-timeout 5 --max-time 30 \
+		-T app/static/NotoColorEmoji-LICENSE.txt \
+		"ftp://$$VITA_IP:1337/ux0:/app/$(TITLE_ID)/NotoColorEmoji-LICENSE.txt"
+	@echo "Noto Color Emoji font and license pushed."
 
 # Push the circular avatar mask (~500 B). Composited on top of avatars
 # to fake circular rendering since vita2d has no clipping primitive.
