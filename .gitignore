@@ -18,3 +18,6 @@ credentials.toml
 
 # Local runtime logs
 /run.log
+
+# Python test harness bytecode
+__pycache__/

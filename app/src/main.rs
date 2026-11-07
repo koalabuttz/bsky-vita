@@ -22,6 +22,9 @@
 
 use std::sync::Arc;
 
+#[cfg(feature = "emulator-tests")]
+mod emulator_test;
+
 use bsky_auth::AuthClient;
 use bsky_input::{buttons, Pad, Touch};
 use bsky_render::{EmojiAtlas, Render, Texture, TextureCache};
@@ -110,6 +113,14 @@ fn main() {
     // screens (TimelineScreen, ProfileScreen, …) when a `SwitchTab`
     // action lands on a tab without an existing instance in the stack.
     let mut auth_client: Option<Arc<AuthClient>> = None;
+
+    #[cfg(feature = "emulator-tests")]
+    if let Some(client) = emulator_test::client().expect("emulator fixture bootstrap") {
+        let client = Arc::new(client);
+        worker = Some(Worker::spawn(Arc::clone(&client)));
+        screen_stack = vec![Box::new(TimelineScreen::new(Arc::clone(&client)))];
+        auth_client = Some(client);
+    }
 
     let mut texture_cache = TextureCache::new(64);
 

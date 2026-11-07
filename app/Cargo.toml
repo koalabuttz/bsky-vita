@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Bluesky (AT Protocol) homebrew client for PlayStation Vita"
 
+[features]
+# Only for the isolated Vita3K harness. Normal VPKs never load fixture sessions.
+emulator-tests = []
+
 [package.metadata.vita]
 title_id = "BSKY00001"
 title_name = "BskyVita"
