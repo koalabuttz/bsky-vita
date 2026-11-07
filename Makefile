@@ -2,7 +2,11 @@ APP_DIR := app
 TITLE_ID := BSKY00001
 VPK := target/armv7-sony-vita-newlibeabihf/release/bsky-vita.vpk
 
-.PHONY: build build-fast run run-fast install push-creds push-font push-emoji push-mask push-gxp fetch-log fetch-gxp test clean help
+.PHONY: build build-fast run run-fast install push-creds push-font push-emoji push-mask push-gxp fetch-log fetch-gxp test test-emulator clean help
+
+# Keep fixture-enabled packages separate from ordinary release VPKs.
+VITA3K_TEST_TARGET_DIR ?= $(CURDIR)/target/vita3k-test-build
+VITA3K_TEST_ARGS ?=
 
 help:
 	@echo "Targets:"
@@ -21,6 +25,7 @@ help:
 	@echo "  fetch-log    Pull ux0:data/$(TITLE_ID)/run.log via vitacompanion FTP"
 	@echo "  fetch-gxp    Pull captured video_yuv_{v,f}.gxp from the device into app/static/"
 	@echo "  test         Host-side library tests (excludes the Vita-target bin)"
+	@echo "  test-emulator Build the fixture VPK and run isolated Vita3K UI tests"
 	@echo "  clean        Remove build artifacts"
 	@echo
 	@echo "Required env: VITA_IP=<vita.lan.ip> for install/run*/push-*/fetch-log"
@@ -166,6 +171,10 @@ push-gxp:
 # The bin crate (bsky-vita-app) is target-locked to Vita and excluded here.
 test:
 	cargo test --workspace --exclude bsky-vita-app
+
+test-emulator:
+	cd $(APP_DIR) && CARGO_TARGET_DIR="$(VITA3K_TEST_TARGET_DIR)" cargo vita build vpk -- --release --locked --features emulator-tests
+	python3 tools/vita3k/run.py --vpk "$(VITA3K_TEST_TARGET_DIR)/armv7-sony-vita-newlibeabihf/release/bsky-vita.vpk" $(VITA3K_TEST_ARGS)
 
 clean:
 	cargo clean

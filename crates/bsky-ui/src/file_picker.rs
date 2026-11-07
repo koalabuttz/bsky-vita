@@ -139,7 +139,7 @@ impl FilePicker {
     /// thumbnail slot, downscaling to the cell size. Called by the owning
     /// ComposeScreen when an `Image` response for one of our requested
     /// paths arrives.
-    pub fn on_image(&mut self, path: &str, bytes: &Result<Vec<u8>, String>) {
+    pub fn on_image(&mut self, path: &str, bytes: &Result<Vec<u8>, bsky_worker::ReadError>) {
         if !self.thumbs.contains_key(path) {
             return; // stale (we navigated away) or not ours
         }

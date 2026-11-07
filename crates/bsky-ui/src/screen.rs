@@ -34,6 +34,10 @@ use crate::tabbar::TopLevel;
 use crate::widget::UiCtx;
 
 pub trait Screen {
+    fn response_owner(&self) -> Option<u64> { None }
+    fn handle_owned_response(&mut self, _request_id: u64, response: WorkResponse) {
+        self.handle_worker_response(response);
+    }
     /// Render this frame and update widget state. Return a transition
     /// action consumed by main.rs after the frame is presented.
     fn frame(
@@ -73,6 +77,26 @@ pub trait Screen {
     }
 }
 
+pub(crate) fn new_response_owner() -> u64 {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NEXT: AtomicU32 = AtomicU32::new(1);
+    u64::from(NEXT.fetch_add(1, Ordering::Relaxed))
+}
+
+/// A covered screen still owns its reads; a removed screen's replies are dropped.
+pub fn dispatch_worker_response(stack: &mut [Box<dyn Screen>], response: WorkResponse) {
+    match response {
+        WorkResponse::ForScreen { owner, request_id, response } => {
+            if let Some(screen) = stack.iter_mut().find(|s| s.response_owner() == Some(owner)) {
+                screen.handle_owned_response(request_id, *response);
+            }
+        }
+        response => {
+            if let Some(top) = stack.last_mut() { top.handle_worker_response(response); }
+        }
+    }
+}
+
 /// Outcome of a `Screen::frame` call. Drives screen routing in main.rs.
 pub enum ScreenAction {
     /// Stay on the current screen.
@@ -103,4 +127,37 @@ pub enum ScreenAction {
     /// Log out: main.rs tears down the worker + auth client, deletes the
     /// on-disk session, and resets the stack to a fresh `LoginScreen`.
     Logout,
+}
+
+#[cfg(test)]
+mod routing_tests {
+    use super::*;
+    use std::{cell::Cell, rc::Rc};
+    struct Receiver { owner: u64, received: Rc<Cell<usize>> }
+    impl Screen for Receiver {
+        fn frame(&mut self, _: &mut Frame, _: &Font, _: &UiCtx, _: &mut Ime) -> ScreenAction { unreachable!() }
+        fn response_owner(&self) -> Option<u64> { Some(self.owner) }
+        fn handle_owned_response(&mut self, request_id: u64, _: WorkResponse) {
+            assert_eq!(request_id, 9);
+            self.received.set(self.received.get() + 1);
+        }
+    }
+    fn response(owner: u64) -> WorkResponse {
+        WorkResponse::ForScreen { owner, request_id: 9, response: Box::new(WorkResponse::PostCreated(Ok("test".into()))) }
+    }
+    #[test]
+    fn covered_screen_receives_its_response_and_removed_owner_is_ignored() {
+        let feed = Rc::new(Cell::new(0));
+        let cover = Rc::new(Cell::new(0));
+        let mut stack: Vec<Box<dyn Screen>> = vec![
+            Box::new(Receiver { owner: 1, received: feed.clone() }),
+            Box::new(Receiver { owner: 2, received: cover.clone() }),
+        ];
+        dispatch_worker_response(&mut stack, response(1));
+        assert_eq!(feed.get(), 1);
+        assert_eq!(cover.get(), 0);
+        stack.remove(0);
+        dispatch_worker_response(&mut stack, response(1));
+        assert_eq!(cover.get(), 0);
+    }
 }

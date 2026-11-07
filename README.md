@@ -75,7 +75,11 @@ make build    # release VPK via cargo-vita  -> target/.../release/bsky-vita.vpk
 make run      # build + push eboot.bin to a networked Vita (set VITA_IP)
 make install  # build + upload the full VPK to ux0:/download/ (set VITA_IP)
 make test     # host-side library tests (Vita-only crates are skipped)
+make test-emulator # isolated Vita3K UI/network regression tests (Linux)
 ```
+
+See [the Vita3K test guide](tools/vita3k/README.md) for emulator dependencies,
+fixtures, screenshot/log artifacts, and the limits of emulator coverage.
 
 ## Project layout
 

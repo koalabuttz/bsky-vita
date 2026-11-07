@@ -26,6 +26,25 @@ pub const MAX_XRPC_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_IMAGE_BYTES: u64 = 24 * 1024 * 1024;
 pub const MAX_VIDEO_BYTES: u64 = 120 * 1024 * 1024;
 
+/// A read failure with an explicit retry policy, separate from its display text.
+#[derive(Clone, Debug)]
+pub struct ReadError {
+    pub message: String,
+    pub retryable: bool,
+}
+impl ReadError {
+    pub fn permanent(message: impl Into<String>) -> Self {
+        Self { message: message.into(), retryable: false }
+    }
+    pub fn http(status: u16) -> Self {
+        Self { message: format!("HTTP {status}"), retryable: status == 408 || status == 429 || status >= 500 }
+    }
+}
+impl std::fmt::Display for ReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { self.message.fmt(f) }
+}
+impl std::error::Error for ReadError {}
+
 /// A blocking HTTP client suitable for the Vita target.
 ///
 /// Wraps a `ureq::Agent` (which is internally `Arc`-shared, so cloning is
@@ -62,15 +81,16 @@ impl VitaHttpClient {
     /// blocks) and auth-free — used for image fetches against the CDN.
     /// Returns an error rather than OOMing if the server advertises (via
     /// Content-Length) or streams more than `max_bytes`.
-    pub fn get_bytes_capped(&self, url: &str, max_bytes: u64) -> Result<Vec<u8>, String> {
+    pub fn get_bytes_capped(&self, url: &str, max_bytes: u64) -> Result<Vec<u8>, ReadError> {
         let resp = match self.agent.get(url).call() {
             Ok(r) => r,
             // ureq classifies HTTP >= 400 as Err(Status); surface the code.
-            Err(ureq::Error::Status(code, _)) => return Err(format!("HTTP {code}")),
-            Err(e) => return Err(format!("{e}")),
+            Err(ureq::Error::Status(code, _)) => return Err(ReadError::http(code)),
+            Err(e) => return Err(ReadError { message: e.to_string(), retryable: true }),
         };
         let total = content_length(&resp);
         read_capped(resp.into_reader(), max_bytes, total, |_, _| {})
+            .map_err(|message| ReadError { retryable: message.starts_with("read:"), message })
     }
 
     /// Stream `url` to `dest`, capped at `max_bytes`, forwarding throttled
@@ -346,5 +366,16 @@ mod tests {
             .unwrap();
         let fut = client.send_http(req);
         assert_send(fut);
+    }
+}
+
+#[cfg(test)]
+mod retry_classification_tests {
+    use super::*;
+    #[test]
+    fn only_transient_http_failures_retry() {
+        for status in [408, 429, 500, 502, 503, 504] { assert!(ReadError::http(status).retryable); }
+        for status in [400, 401, 403, 404, 413] { assert!(!ReadError::http(status).retryable); }
+        assert!(!ReadError::permanent("decode failed").retryable);
     }
 }

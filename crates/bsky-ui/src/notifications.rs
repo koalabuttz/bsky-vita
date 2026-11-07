@@ -22,7 +22,6 @@
 //! - Filtering by reason (Bluesky's "Mentions" / "Likes" tabs).
 //! - Real-time unread badge on the tab bar Notifs cell.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use atrium_api::app::bsky::notification::list_notifications::Notification;
@@ -69,7 +68,6 @@ pub struct NotificationsScreen {
     fetching_more: bool,
     marked_seen: bool,
     row_heights: Vec<i32>,
-    inflight_avatars: HashSet<String>,
     tab_bar: TabBar,
 }
 
@@ -84,7 +82,6 @@ impl NotificationsScreen {
             fetching_more: false,
             marked_seen: false,
             row_heights: Vec::new(),
-            inflight_avatars: HashSet::new(),
             tab_bar: TabBar::new(TopLevel::Notifications),
         }
     }
@@ -187,19 +184,14 @@ impl Screen for NotificationsScreen {
 
         // Avatar dispatch for visible rows.
         if let NotifState::Loaded { notifications, .. } = &self.state {
-            if let Some(worker) = ctx.worker {
+            if ctx.worker.is_some() {
                 let mut y_probe = HEADER_H - self.scroll_y as i32;
                 for (notif, &row_h) in notifications.iter().zip(self.row_heights.iter()) {
                     let row_bottom = y_probe + row_h;
                     if row_bottom > VIEWPORT_TOP && y_probe < VIEWPORT_BOTTOM {
                         if let Some(url) = notif.author.avatar.as_ref() {
                             let url = avatar_thumbnail_jpeg(url);
-                            if !ctx.texture_cache.contains(&url)
-                                && !self.inflight_avatars.contains(&url)
-                            {
-                                worker.send(WorkRequest::FetchImage { url: url.clone() });
-                                self.inflight_avatars.insert(url);
-                            }
+                            ctx.request_image(&url);
                         }
                     }
                     y_probe += row_h;
@@ -351,11 +343,6 @@ impl Screen for NotificationsScreen {
         match resp {
             WorkResponse::Notifications(Ok(batch)) => {
                 self.fetching_more = false;
-                // MarkSeen response carries an empty batch; ignore so we
-                // don't replace real notifications.
-                if batch.notifications.is_empty() && batch.cursor.is_none() {
-                    return;
-                }
                 match &mut self.state {
                     NotifState::Loaded {
                         notifications,
@@ -378,9 +365,7 @@ impl Screen for NotificationsScreen {
                     self.state = NotifState::Error(e);
                 }
             }
-            WorkResponse::Image { url, .. } => {
-                self.inflight_avatars.remove(&url);
-            }
+            WorkResponse::Image { .. } => {}
             _ => {}
         }
     }
@@ -393,6 +378,79 @@ impl Screen for NotificationsScreen {
 enum NotifTapAction {
     OpenThread(String),
     OpenProfile(String),
+}
+
+#[cfg(test)]
+mod empty_inbox_tests {
+    use super::*;
+    use atrium_api::agent::atp_agent::AtpAgent;
+    use bsky_auth::{AuthAgent, FileSessionStore, PdsClient, ResolvedIdentity};
+    use bsky_worker::NotificationBatch;
+
+    fn screen() -> NotificationsScreen {
+        NotificationsScreen::new(Arc::new(AuthClient {
+            agent: AuthAgent::Password(AtpAgent::new(
+                PdsClient::new(Arc::new(Default::default()), "https://unused.invalid"),
+                FileSessionStore::new("/unused/notifications-test.json"),
+            )),
+            resolved: ResolvedIdentity {
+                did: "did:plc:test".into(),
+                pds: "https://unused.invalid".into(),
+            },
+        }))
+    }
+
+    fn empty_page() -> WorkResponse {
+        WorkResponse::Notifications(Ok(NotificationBatch {
+            notifications: Vec::new(),
+            cursor: None,
+        }))
+    }
+
+    #[test]
+    fn an_empty_first_page_finishes_loading() {
+        let mut screen = screen();
+        screen.handle_worker_response(empty_page());
+        assert!(
+            matches!(screen.state, NotifState::Loaded { ref notifications, next_cursor: None }
+            if notifications.is_empty())
+        );
+    }
+
+    #[test]
+    fn mark_seen_acknowledgement_never_changes_the_list_state() {
+        let mut screen = screen();
+        screen.handle_worker_response(WorkResponse::NotificationsSeen);
+        assert!(matches!(screen.state, NotifState::Loading));
+        screen.state = NotifState::Loaded {
+            notifications: Vec::new(),
+            next_cursor: Some("next".into()),
+        };
+        screen.handle_worker_response(WorkResponse::NotificationsSeen);
+        assert!(
+            matches!(screen.state, NotifState::Loaded { next_cursor: Some(ref cursor), .. }
+            if cursor == "next")
+        );
+    }
+
+    #[test]
+    fn an_empty_final_page_clears_the_pagination_cursor() {
+        let mut screen = screen();
+        screen.state = NotifState::Loaded {
+            notifications: Vec::new(),
+            next_cursor: Some("next".into()),
+        };
+        screen.fetching_more = true;
+        screen.handle_worker_response(empty_page());
+        assert!(!screen.fetching_more);
+        assert!(matches!(
+            screen.state,
+            NotifState::Loaded {
+                next_cursor: None,
+                ..
+            }
+        ));
+    }
 }
 
 /// Decide what tapping a notification should do based on its reason.

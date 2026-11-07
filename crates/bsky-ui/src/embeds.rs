@@ -124,7 +124,7 @@ pub(crate) fn draw_embed_block(
     };
     match refs {
         PostViewEmbedRefs::AppBskyEmbedImagesView(v) => {
-            draw_image_grid(frame, x, y, v, cache);
+            draw_image_grid(frame, font, x, y, v, cache);
         }
         PostViewEmbedRefs::AppBskyEmbedExternalView(v) => {
             draw_external_card(frame, font, x, y, v, cache, emoji);
@@ -361,7 +361,7 @@ fn measure_aspect_image(ar: Option<&AspectRatio>) -> i32 {
     h_from_w.clamp(80, SINGLE_IMG_MAX_H)
 }
 
-fn draw_image_grid(frame: &mut Frame, x: i32, y: i32, v: &ImagesView, cache: &TextureCache) {
+fn draw_image_grid(frame: &mut Frame, font: &Font, x: i32, y: i32, v: &ImagesView, cache: &TextureCache) {
     let n = v.images.len();
     if n == 0 {
         return;
@@ -374,7 +374,7 @@ fn draw_image_grid(frame: &mut Frame, x: i32, y: i32, v: &ImagesView, cache: &Te
         let w = w.min(INNER_W);
         // Left-justified — flush with the body text column.
         draw_image_cell(
-            frame,
+            frame, font,
             &crate::cdn::ensure_jpeg(&img.thumb),
             x,
             y,
@@ -388,7 +388,7 @@ fn draw_image_grid(frame: &mut Frame, x: i32, y: i32, v: &ImagesView, cache: &Te
     if n == 2 {
         let cell_w = (INNER_W - GRID_GAP) / 2;
         draw_image_cell(
-            frame,
+            frame, font,
             &v.images[0].thumb,
             x,
             y,
@@ -398,7 +398,7 @@ fn draw_image_grid(frame: &mut Frame, x: i32, y: i32, v: &ImagesView, cache: &Te
             false,
         );
         draw_image_cell(
-            frame,
+            frame, font,
             &v.images[1].thumb,
             x + cell_w + GRID_GAP,
             y,
@@ -414,7 +414,7 @@ fn draw_image_grid(frame: &mut Frame, x: i32, y: i32, v: &ImagesView, cache: &Te
         for (i, img) in v.images.iter().enumerate() {
             let cx = x + (i as i32) * (cell_w + GRID_GAP);
             draw_image_cell(
-                frame,
+                frame, font,
                 &crate::cdn::ensure_jpeg(&img.thumb),
                 cx,
                 y,
@@ -434,7 +434,7 @@ fn draw_image_grid(frame: &mut Frame, x: i32, y: i32, v: &ImagesView, cache: &Te
         let cx = x + col * (cell_w + GRID_GAP);
         let cy = y + row * (GRID_4_CELL_H + GRID_GAP);
         draw_image_cell(
-            frame,
+            frame, font,
             &crate::cdn::ensure_jpeg(&img.thumb),
             cx,
             cy,
@@ -448,6 +448,7 @@ fn draw_image_grid(frame: &mut Frame, x: i32, y: i32, v: &ImagesView, cache: &Te
 
 fn draw_image_cell(
     frame: &mut Frame,
+    font: &Font,
     thumb_url: &str,
     x: i32,
     y: i32,
@@ -456,7 +457,8 @@ fn draw_image_cell(
     cache: &TextureCache,
     aspect_fit: bool,
 ) {
-    if let Some(tex) = cache.get(thumb_url) {
+    let key = crate::cdn::ensure_jpeg(thumb_url);
+    if let Some(tex) = cache.get(&key) {
         let tw = tex.width().max(1) as f32;
         let th = tex.height().max(1) as f32;
         if aspect_fit {
@@ -474,8 +476,11 @@ fn draw_image_cell(
             frame.draw_texture_scale(tex, x as f32, y as f32, sx, sy);
         }
     } else {
-        // Placeholder while loading.
         frame.fill_rect(x as f32, y as f32, w as f32, h as f32, theme::FIELD_BG);
+        let label = if cache.image_has_failed(&key) { "Image unavailable" }
+            else { "Loading image..." };
+        let width = frame.measure_text(font, 0.7, label).0;
+        frame.draw_text(font, x + (w - width) / 2, y + h / 2, theme::TEXT_MUTED, 0.7, label);
     }
 }
 
@@ -781,7 +786,7 @@ fn draw_media(
 ) {
     match media.into_refs() {
         Some(ViewMediaRefs::AppBskyEmbedImagesView(v)) => {
-            draw_image_grid(frame, x, y, v, cache);
+            draw_image_grid(frame, font, x, y, v, cache);
         }
         Some(ViewMediaRefs::AppBskyEmbedVideoView(v)) => {
             draw_video_thumb(frame, x, y, v, cache);

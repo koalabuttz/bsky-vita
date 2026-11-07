@@ -11,7 +11,6 @@
 //! served by the chat service proxy (see `bsky-worker`); a missing DM
 //! app-password scope surfaces as a `DM_SCOPE:` error here.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use atrium_api::chat::bsky::convo::defs::{ConvoView, ConvoViewLastMessageRefs};
@@ -61,7 +60,6 @@ pub struct ConversationListScreen {
     dispatched: bool,
     fetching_more: bool,
     row_heights: Vec<i32>,
-    inflight_avatars: HashSet<String>,
     tab_bar: TabBar,
 }
 
@@ -77,7 +75,6 @@ impl ConversationListScreen {
             dispatched: false,
             fetching_more: false,
             row_heights: Vec::new(),
-            inflight_avatars: HashSet::new(),
             tab_bar: TabBar::new(TopLevel::Messages),
         }
     }
@@ -170,7 +167,7 @@ impl Screen for ConversationListScreen {
 
         // Avatar dispatch for visible rows.
         if let ListState::Loaded { convos, .. } = &self.state {
-            if let Some(worker) = ctx.worker {
+            if ctx.worker.is_some() {
                 let mut y_probe = HEADER_H - self.scroll_y as i32;
                 for (convo, &row_h) in convos.iter().zip(self.row_heights.iter()) {
                     let row_bottom = y_probe + row_h;
@@ -178,12 +175,7 @@ impl Screen for ConversationListScreen {
                         if let Some(member) = primary_other(convo, &self.own_did) {
                             if let Some(url) = member.avatar.as_ref() {
                                 let url = avatar_thumbnail_jpeg(url);
-                                if !ctx.texture_cache.contains(&url)
-                                    && !self.inflight_avatars.contains(&url)
-                                {
-                                    worker.send(WorkRequest::FetchImage { url: url.clone() });
-                                    self.inflight_avatars.insert(url);
-                                }
+                                ctx.request_image(&url);
                             }
                         }
                     }
@@ -352,9 +344,7 @@ impl Screen for ConversationListScreen {
                     self.state = ListState::Error { msg: e, auth_scope };
                 }
             }
-            WorkResponse::Image { url, .. } => {
-                self.inflight_avatars.remove(&url);
-            }
+            WorkResponse::Image { .. } => {}
             _ => {}
         }
     }

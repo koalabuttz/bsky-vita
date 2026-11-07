@@ -73,6 +73,25 @@ pub struct UiCtx<'a> {
     pub avatar_mask_field: Option<&'a Texture>,
 }
 
+impl UiCtx<'_> {
+    pub fn request_post_images(&self, post: &atrium_api::app::bsky::feed::defs::FeedViewPost) {
+        if let Some(url) = post.post.author.avatar.as_deref() {
+            self.request_image(&crate::cdn::avatar_thumbnail_jpeg(url));
+        }
+        for url in crate::embeds::embed_image_urls(post.post.embed.as_ref()) {
+            self.request_image(&url);
+        }
+    }
+
+    pub fn request_image(&self, url: &str) {
+        if let Some(worker) = self.worker {
+            if self.texture_cache.request_image(url) {
+                worker.send(bsky_worker::WorkRequest::FetchImage { url: url.to_owned() });
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct ButtonState {
     pub pressed_last: bool,
