@@ -570,7 +570,7 @@ impl ProfileScreen {
     fn handle_feed_page(
         &mut self,
         source: FeedSource,
-        batch: Result<bsky_worker::TimelineBatch, String>,
+        batch: Result<bsky_worker::TimelineBatch, bsky_worker::ReadError>,
     ) {
         // Extract (tab, actor) from the source.
         let (tab, actor) = match &source {
@@ -620,6 +620,7 @@ impl ProfileScreen {
                 // haven't opted in: the PDS returns "Profile not found"
                 // 400 when the requester isn't authorized. Surface a
                 // friendlier note instead of the raw XRPC string.
+                let e = e.to_string();
                 let pretty = if tab == ProfileTab::Likes && e.contains("Profile not found") {
                     "This user's likes aren't visible.".to_string()
                 } else {
@@ -1439,6 +1440,7 @@ impl Screen for ProfileScreen {
 
     fn handle_worker_response(&mut self, resp: WorkResponse) {
         match resp {
+            WorkResponse::ForScreen { .. } => {}
             WorkResponse::Profile(Ok(p)) => {
                 // Capture the resolved DID — gates per-tab fetches and
                 // is the staleness key for tab responses.

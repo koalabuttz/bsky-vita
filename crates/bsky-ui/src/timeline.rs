@@ -25,6 +25,7 @@
 //! - Tap-a-post → thread view (Phase 4+).
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use atrium_api::app::bsky::feed::defs::{FeedViewPost, FeedViewPostReasonRefs, ReplyRefParentRefs};
 use atrium_api::types::{TryFromUnknown, Union, Unknown};
@@ -42,7 +43,8 @@ use crate::profile::ProfileScreen;
 use crate::screen::{Screen, ScreenAction};
 use crate::tabbar::{TabBar, TopLevel, TAB_BAR_HEIGHT};
 use crate::thread::ThreadScreen;
-use crate::widget::{ButtonState, Rect, UiCtx};
+use crate::widget::{button, ButtonState, Rect, UiCtx};
+use crate::read_retry::ReadRetry;
 
 /// Sticky header height (px). Posts render below this; the header is
 /// drawn last so it covers any content that's scrolled into its zone.
@@ -105,10 +107,25 @@ enum TimelineState {
     /// Initial fetch failed. Subsequent-page failures don't enter this
     /// state (we just clear `fetching_more` and let the user re-trigger
     /// by scrolling).
-    Error(String),
+    Error,
+}
+
+struct PendingFeed {
+    cursor: Option<String>,
+    replace: bool,
+    request_id: Option<u64>,
+    waiting: bool,
+    retry: ReadRetry,
+    error: Option<String>,
 }
 
 pub struct TimelineScreen {
+    owner: u64,
+    next_request_id: u64,
+    saved_request_id: Option<u64>,
+    feed_request: Option<PendingFeed>,
+    retry_btn: ButtonState,
+    refresh_btn: ButtonState,
     client: Arc<AuthClient>,
     state: TimelineState,
     /// Which feed is currently displayed. Initial value is
@@ -168,6 +185,12 @@ impl TimelineScreen {
 
     fn with_source(client: Arc<AuthClient>, source: FeedSource, is_pushed: bool) -> Self {
         Self {
+            owner: crate::screen::new_response_owner(),
+            next_request_id: 0,
+            saved_request_id: None,
+            feed_request: None,
+            retry_btn: ButtonState::default(),
+            refresh_btn: ButtonState::default(),
             client,
             state: TimelineState::Loading,
             current_source: source,
@@ -184,6 +207,65 @@ impl TimelineScreen {
         }
     }
 
+    fn send_owned(&mut self, worker: &bsky_worker::Worker, request: WorkRequest) -> u64 {
+        self.next_request_id += 1;
+        worker.send(WorkRequest::ForScreen {
+            owner: self.owner, request_id: self.next_request_id, request: Box::new(request),
+        });
+        self.next_request_id
+    }
+
+    fn begin_fetch(&mut self, cursor: Option<String>, replace: bool, now: Instant) {
+        self.feed_request = Some(PendingFeed {
+            cursor, replace, request_id: None, waiting: false,
+            retry: ReadRetry::new(now), error: None,
+        });
+        self.dispatched = true;
+        if matches!(self.state, TimelineState::Error) { self.state = TimelineState::Loading; }
+    }
+
+    fn service_fetch(&mut self, worker: Option<&bsky_worker::Worker>, now: Instant) {
+        let Some(worker) = worker else { return };
+        let cursor = self.feed_request.as_ref().filter(|p| !p.waiting && p.retry.ready(now))
+            .map(|p| p.cursor.clone());
+        if let Some(cursor) = cursor {
+            let request_id = self.send_owned(worker, WorkRequest::FetchFeed {
+                source: self.current_source.clone(), cursor: cursor.clone(),
+            });
+            let pending = self.feed_request.as_mut().unwrap();
+            pending.request_id = Some(request_id);
+            pending.waiting = true;
+            self.fetching_more = cursor.is_some();
+        }
+    }
+
+    fn finish_fetch(&mut self, batch: Result<bsky_worker::TimelineBatch, bsky_worker::ReadError>, now: Instant) {
+        let Some(pending) = self.feed_request.as_mut() else { return };
+        pending.waiting = false;
+        self.fetching_more = false;
+        match batch {
+            Ok(batch) => {
+                if pending.replace {
+                    self.state = TimelineState::Loaded { posts: batch.posts, next_cursor: batch.cursor };
+                    self.row_heights.clear();
+                    self.scroll_y = 0.0;
+                    self.selected_idx = 0;
+                } else if let TimelineState::Loaded { posts, next_cursor } = &mut self.state {
+                    posts.extend(batch.posts);
+                    *next_cursor = batch.cursor;
+                }
+                self.feed_request = None;
+            }
+            Err(error) => {
+                pending.retry.failed(error.retryable, now);
+                pending.error = Some(error.message.clone());
+                if matches!(self.state, TimelineState::Loading | TimelineState::Error) {
+                    self.state = TimelineState::Error;
+                }
+            }
+        }
+    }
+
     /// Switch to a new feed source. Resets paging state so the next
     /// frame re-dispatches the initial page.
     fn switch_to(&mut self, source: FeedSource) {
@@ -193,6 +275,7 @@ impl TimelineScreen {
         self.current_source = source;
         self.state = TimelineState::Loading;
         self.dispatched = false;
+        self.feed_request = None;
         self.fetching_more = false;
         self.row_heights.clear();
         self.scroll_y = 0.0;
@@ -499,20 +582,13 @@ impl Screen for TimelineScreen {
         _ime: &mut Ime,
     ) -> ScreenAction {
         // ─── 1. Dispatch initial fetch on first frame. ─────────────────
-        if !self.dispatched {
-            if let Some(worker) = ctx.worker {
-                worker.send(WorkRequest::FetchFeed {
-                    source: self.current_source.clone(),
-                    cursor: None,
-                });
-                self.dispatched = true;
-            }
-        }
+        if !self.dispatched { self.begin_fetch(None, true, Instant::now()); }
+        self.service_fetch(ctx.worker, Instant::now());
         // Pushed instances target a specific feed and skip the saved-
         // feeds pill row, so no need to fetch the user's saved feeds.
         if !self.saved_feeds_dispatched && !self.is_pushed {
             if let Some(worker) = ctx.worker {
-                worker.send(WorkRequest::FetchSavedFeeds);
+                self.saved_request_id = Some(self.send_owned(worker, WorkRequest::FetchSavedFeeds));
                 self.saved_feeds_dispatched = true;
             }
         }
@@ -639,7 +715,7 @@ impl Screen for TimelineScreen {
         }
 
         // ─── 5. Pagination trigger. ───────────────────────────────────
-        if !self.fetching_more {
+        if !self.fetching_more && self.feed_request.is_none() {
             if let TimelineState::Loaded {
                 next_cursor: Some(cursor),
                 ..
@@ -649,11 +725,8 @@ impl Screen for TimelineScreen {
                     self.scroll_y as i32 + VIEWPORT_H + PAGINATION_THRESHOLD >= total_h;
                 if near_bottom {
                     if let Some(worker) = ctx.worker {
-                        worker.send(WorkRequest::FetchFeed {
-                            source: self.current_source.clone(),
-                            cursor: Some(cursor.clone()),
-                        });
-                        self.fetching_more = true;
+                        self.begin_fetch(Some(cursor.clone()), false, Instant::now());
+                        self.service_fetch(Some(worker), Instant::now());
                     }
                 }
             }
@@ -757,7 +830,7 @@ impl Screen for TimelineScreen {
                     }
                 }
             }
-            TimelineState::Error(msg) => {
+            TimelineState::Error => {
                 frame.draw_text_centered(
                     font,
                     SCREEN_HEIGHT / 2 - 20,
@@ -770,8 +843,27 @@ impl Screen for TimelineScreen {
                     SCREEN_HEIGHT / 2 + 20,
                     theme::TEXT_MUTED,
                     0.85,
-                    msg,
+                    "Check your connection and try again.",
                 );
+            }
+        }
+
+        let failed_read = self.feed_request.as_ref().is_some_and(|p| p.error.is_some());
+        if failed_read {
+            let initial = matches!(self.state, TimelineState::Error);
+            let y = if initial { SCREEN_HEIGHT / 2 + 48 } else { VIEWPORT_BOTTOM - 48 };
+            let (waiting, scheduled, cursor, replace) = {
+                let p = self.feed_request.as_ref().unwrap();
+                (p.waiting, p.retry.scheduled(), p.cursor.clone(), p.replace)
+            };
+            frame.fill_rect(0.0, y as f32, SCREEN_WIDTH as f32, 48.0, theme::FIELD_BG);
+            let label = if waiting { "Retrying..." } else if scheduled { "Connection failed - retrying shortly" }
+                else { "Could not load the feed" };
+            frame.draw_text(font, 16, y + 29, theme::TEXT_MUTED, 0.85, label);
+            if button(frame, font, Rect::new(740.0, (y + 3) as f32, 200.0, 42.0),
+                "Retry now", &mut self.retry_btn, ctx, !waiting) {
+                self.begin_fetch(cursor, replace, Instant::now());
+                return ScreenAction::None;
             }
         }
 
@@ -803,6 +895,12 @@ impl Screen for TimelineScreen {
             theme::FIELD_BG,
         );
         frame.draw_text_centered(font, 26, theme::TEXT_PRIMARY, 1.1, &header_label);
+        let can_refresh = !self.feed_request.as_ref().is_some_and(|p| p.waiting);
+        if button(frame, font, Rect::new(844.0, 3.0, 104.0, 34.0), "Refresh",
+            &mut self.refresh_btn, ctx, can_refresh) {
+            self.begin_fetch(None, true, Instant::now());
+            return ScreenAction::None;
+        }
         frame.fill_rect(
             0.0,
             HEADER_H as f32 - 1.0,
@@ -845,7 +943,7 @@ impl Screen for TimelineScreen {
             let touches: Vec<_> = ctx
                 .touches
                 .iter()
-                .filter(|t| t.y < VIEWPORT_BOTTOM)
+                .filter(|t| t.y >= VIEWPORT_TOP && t.y < if failed_read { VIEWPORT_BOTTOM - 48 } else { VIEWPORT_BOTTOM })
                 .map(|t| (t.x, t.y))
                 .collect();
             let mut tap_action: Option<TapAction> = None;
@@ -1011,6 +1109,23 @@ impl Screen for TimelineScreen {
         ScreenAction::None
     }
 
+    fn response_owner(&self) -> Option<u64> { Some(self.owner) }
+
+    fn handle_owned_response(&mut self, request_id: u64, response: WorkResponse) {
+        match &response {
+            WorkResponse::FeedPage { source, .. } => {
+                if source != &self.current_source || !self.feed_request.as_ref()
+                    .is_some_and(|p| p.waiting && p.request_id == Some(request_id)) { return; }
+            }
+            WorkResponse::SavedFeeds(_) => {
+                if self.saved_request_id != Some(request_id) { return; }
+                self.saved_request_id = None;
+            }
+            _ => return,
+        }
+        self.handle_worker_response(response);
+    }
+
     fn top_level(&self) -> Option<TopLevel> {
         if self.is_pushed {
             None
@@ -1036,32 +1151,9 @@ impl Screen for TimelineScreen {
         match resp {
             // Feed page for the *currently shown* feed.
             WorkResponse::FeedPage { source, batch } if source == self.current_source => {
-                match batch {
-                    Ok(batch) => {
-                        self.fetching_more = false;
-                        match &mut self.state {
-                            TimelineState::Loaded { posts, next_cursor } => {
-                                posts.extend(batch.posts);
-                                *next_cursor = batch.cursor;
-                            }
-                            _ => {
-                                self.state = TimelineState::Loaded {
-                                    posts: batch.posts,
-                                    next_cursor: batch.cursor,
-                                };
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        self.fetching_more = false;
-                        if matches!(self.state, TimelineState::Loading) {
-                            self.state = TimelineState::Error(e);
-                        }
-                        // Page-load failures past the first page: silent.
-                        // User can scroll to retrigger.
-                    }
-                }
+                self.finish_fetch(batch, Instant::now());
             }
+            WorkResponse::ForScreen { .. } => {}
             // Stale feed page (user switched feeds while in flight). Drop.
             WorkResponse::FeedPage { .. } => {}
             // Saved feeds populate the pill row.
@@ -1688,4 +1780,70 @@ fn placeholder_color(handle: &str) -> Color {
         h = h.wrapping_mul(16777619) ^ b as u32;
     }
     PALETTE[(h as usize) % PALETTE.len()]
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    use atrium_api::agent::atp_agent::AtpAgent;
+    use bsky_auth::{AuthAgent, FileSessionStore, PdsClient, ResolvedIdentity};
+
+    fn screen() -> TimelineScreen {
+        let client = Arc::new(AuthClient {
+            agent: AuthAgent::Password(AtpAgent::new(
+                PdsClient::new(Arc::new(Default::default()), "https://unused.invalid"),
+                FileSessionStore::new("/unused/timeline-test.json"),
+            )),
+            resolved: ResolvedIdentity { did: "did:plc:test".into(), pds: "https://unused.invalid".into() },
+        });
+        TimelineScreen::new(client)
+    }
+    fn waiting(screen: &mut TimelineScreen, id: u64) {
+        screen.begin_fetch(None, true, Instant::now());
+        let pending = screen.feed_request.as_mut().unwrap();
+        pending.waiting = true;
+        pending.request_id = Some(id);
+    }
+    fn page(cursor: &str) -> WorkResponse {
+        WorkResponse::FeedPage { source: FeedSource::Following,
+            batch: Ok(bsky_worker::TimelineBatch { posts: Vec::new(), cursor: Some(cursor.into()) }) }
+    }
+    #[test]
+    fn old_response_after_switching_away_and_back_is_ignored() {
+        let mut screen = screen();
+        waiting(&mut screen, 1);
+        screen.switch_to(FeedSource::Feed("at://other".into()));
+        screen.switch_to(FeedSource::Following);
+        waiting(&mut screen, 2);
+        screen.handle_owned_response(1, page("stale"));
+        assert!(matches!(screen.state, TimelineState::Loading));
+        screen.handle_owned_response(2, page("fresh"));
+        screen.handle_owned_response(2, page("duplicate"));
+        assert!(matches!(&screen.state, TimelineState::Loaded { next_cursor: Some(c), .. } if c == "fresh"));
+    }
+    #[test]
+    fn refresh_failure_retains_loaded_feed_and_schedules_retry() {
+        let mut screen = screen();
+        screen.state = TimelineState::Loaded { posts: Vec::new(), next_cursor: Some("existing".into()) };
+        screen.scroll_y = 40.0;
+        waiting(&mut screen, 7);
+        screen.handle_owned_response(7, WorkResponse::FeedPage { source: FeedSource::Following,
+            batch: Err(bsky_worker::ReadError::http(503)) });
+        assert!(matches!(&screen.state, TimelineState::Loaded { next_cursor: Some(c), .. } if c == "existing"));
+        assert_eq!(screen.scroll_y, 40.0);
+        let pending = screen.feed_request.as_ref().unwrap();
+        assert!(pending.retry.scheduled());
+        assert!(!pending.waiting);
+    }
+    #[test]
+    fn failed_pagination_keeps_the_cursor_for_manual_retry() {
+        let mut screen = screen();
+        screen.state = TimelineState::Loaded { posts: Vec::new(), next_cursor: Some("page-2".into()) };
+        screen.begin_fetch(Some("page-2".into()), false, Instant::now());
+        screen.finish_fetch(Err(bsky_worker::ReadError::http(404)), Instant::now());
+        let pending = screen.feed_request.as_ref().unwrap();
+        assert_eq!(pending.cursor.as_deref(), Some("page-2"));
+        assert!(!pending.retry.scheduled());
+        assert!(!pending.replace);
+    }
 }

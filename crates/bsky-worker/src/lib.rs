@@ -8,7 +8,7 @@
 //!
 //! Screens dispatch typed [`WorkRequest`]s via [`Worker::send`]; the render
 //! loop drains [`Worker::try_recv`] each frame and hands [`WorkResponse`]s
-//! back to the active screen via `Screen::handle_worker_response`.
+//! back to the originating screen for owned reads, or the active screen otherwise.
 //!
 //! A single worker thread is sufficient for Phase 3:
 //! - atrium serializes session-refresh state via `tokio::sync::Mutex`, so
@@ -116,6 +116,8 @@ pub enum FeedSource {
 /// async operation; keep variants narrow (one network call each) so the
 /// response side stays tractable.
 pub enum WorkRequest {
+    /// Deliver the result to its originating screen, including when covered.
+    ForScreen { owner: u64, request_id: u64, request: Box<WorkRequest> },
     /// Fetch a profile. `actor: None` means the logged-in user's own
     /// profile (DID resolved from the session). `Some(handle_or_did)`
     /// fetches that actor's profile.
@@ -372,13 +374,14 @@ pub struct MessagesBatch {
 /// A completed work item. Each variant's payload mirrors the request that
 /// produced it, with a `Result` because every PDS call can fail.
 pub enum WorkResponse {
+    ForScreen { owner: u64, request_id: u64, response: Box<WorkResponse> },
     Profile(Result<Box<ProfileViewDetailedData>, String>),
     /// One page of feed posts. `source` echoes the request so screens
     /// holding multiple feeds in flight (or that have switched away
     /// from a feed) can route or drop the response correctly.
     FeedPage {
         source: FeedSource,
-        batch: Result<TimelineBatch, String>,
+        batch: Result<TimelineBatch, ReadError>,
     },
     /// User's pinned saved feeds (already hydrated with display metadata).
     SavedFeeds(Result<SavedFeedsBatch, String>),
@@ -486,9 +489,10 @@ impl WorkResponse {
     /// CDN, `VideoBlob` via `getBlob`), whose errors are network/CDN, not
     /// session auth.
     pub fn auth_failed(&self) -> bool {
+        if let Self::ForScreen { response, .. } = self { return response.auth_failed(); }
         let err: Option<&str> = match self {
             WorkResponse::Profile(Err(e)) => Some(e),
-            WorkResponse::FeedPage { batch: Err(e), .. } => Some(e),
+            WorkResponse::FeedPage { batch: Err(e), .. } => Some(&e.message),
             WorkResponse::SavedFeeds(Err(e)) => Some(e),
             WorkResponse::PostCreated(Err(e)) => Some(e),
             WorkResponse::PostDeleted { result: Err(e), .. } => Some(e),
@@ -631,6 +635,7 @@ fn run(
 /// network failure (most do — they show fallbacks rather than error
 /// UIs).
 fn log_if_err(resp: &WorkResponse) {
+    if let WorkResponse::ForScreen { response, .. } = resp { log_if_err(response); return; }
     match resp {
         WorkResponse::Profile(Err(e)) => bsky_log::log!("worker: Profile err: {e}"),
         WorkResponse::FeedPage { source, batch: Err(e) } => {
@@ -694,6 +699,9 @@ fn handle_request(
     responses: &Sender<WorkResponse>,
 ) -> WorkResponse {
     match req {
+        WorkRequest::ForScreen { owner, request_id, request } => WorkResponse::ForScreen {
+            owner, request_id, response: Box::new(handle_request(client, *request, responses)),
+        },
         WorkRequest::FetchProfile { actor } => {
             // Resolve actor: None ⇒ session's own DID; Some(s) ⇒ use directly.
             let actor_str = match actor {
@@ -889,7 +897,7 @@ fn fetch_feed_page(
                 },
                 Err(e) => WorkResponse::FeedPage {
                     source,
-                    batch: Err(format!("{e}")),
+                    batch: Err(feed_read_error(e)),
                 },
             }
         }
@@ -910,7 +918,7 @@ fn fetch_feed_page(
                 },
                 Err(e) => WorkResponse::FeedPage {
                     source,
-                    batch: Err(format!("{e}")),
+                    batch: Err(feed_read_error(e)),
                 },
             }
         }
@@ -928,7 +936,7 @@ fn fetch_feed_page(
                 Err(e) => {
                     return WorkResponse::FeedPage {
                         source,
-                        batch: Err(format!("invalid actor {actor:?}: {e}")),
+                        batch: Err(ReadError::permanent(format!("invalid actor {actor:?}: {e}"))),
                     };
                 }
             };
@@ -954,7 +962,7 @@ fn fetch_feed_page(
                 },
                 Err(e) => WorkResponse::FeedPage {
                     source,
-                    batch: Err(format!("{e}")),
+                    batch: Err(feed_read_error(e)),
                 },
             }
         }
@@ -965,7 +973,7 @@ fn fetch_feed_page(
                 Err(e) => {
                     return WorkResponse::FeedPage {
                         source,
-                        batch: Err(format!("invalid actor {actor:?}: {e}")),
+                        batch: Err(ReadError::permanent(format!("invalid actor {actor:?}: {e}"))),
                     };
                 }
             };
@@ -985,7 +993,7 @@ fn fetch_feed_page(
                 },
                 Err(e) => WorkResponse::FeedPage {
                     source,
-                    batch: Err(format!("{e}")),
+                    batch: Err(feed_read_error(e)),
                 },
             }
         }
@@ -2034,4 +2042,32 @@ fn fetch_video_blob(
 /// (cdn.bsky.app) don't require Bearer tokens.
 fn fetch_image_bytes(url: &str) -> Result<Vec<u8>, ReadError> {
     VitaHttpClient::new().get_bytes_capped(url, bsky_net::MAX_IMAGE_BYTES)
+}
+
+fn feed_read_error<E: std::fmt::Debug + std::fmt::Display>(error: atrium_xrpc::error::Error<E>) -> ReadError {
+    let retryable = match &error {
+        atrium_xrpc::error::Error::XrpcResponse(response) => ReadError::http(response.status.as_u16()).retryable,
+        atrium_xrpc::error::Error::HttpClient(_) => true,
+        _ => false,
+    };
+    ReadError { message: error.to_string(), retryable }
+}
+
+#[cfg(test)]
+mod feed_error_tests {
+    use super::*;
+    #[test]
+    fn feed_retry_policy_uses_http_status_and_preserves_auth_failures() {
+        use atrium_xrpc::error::{Error, XrpcError};
+        for (status, retryable) in [(401, false), (404, false), (429, true), (503, true)] {
+            let error = Error::<String>::XrpcResponse(XrpcError {
+                status: atrium_xrpc::http::StatusCode::from_u16(status).unwrap(), error: None,
+            });
+            assert_eq!(feed_read_error(error).retryable, retryable);
+        }
+        let response = WorkResponse::ForScreen { owner: 1, request_id: 2,
+            response: Box::new(WorkResponse::FeedPage { source: FeedSource::Following,
+                batch: Err(ReadError::permanent("ExpiredToken")) }) };
+        assert!(response.auth_failed());
+    }
 }

@@ -164,7 +164,7 @@ fn main() {
         }
 
         // Drain any worker responses produced since the last frame and
-        // hand them to the TOP screen. For `Image` responses, decode
+        // route owned reads to their screen (even when covered). For `Image` responses, decode
         // and insert into the cache before forwarding so screens can
         // clear inflight tracking after the cache is already populated.
         // Set when a worker response shows the session's tokens are dead
@@ -218,9 +218,7 @@ fn main() {
                     }
                 }
                 let dead = resp.auth_failed();
-                if let Some(top) = screen_stack.last_mut() {
-                    top.handle_worker_response(resp);
-                }
+                bsky_ui::screen::dispatch_worker_response(&mut screen_stack, resp);
                 if dead {
                     bsky_log::log!("main: session auth failed — returning to login");
                     session_dead = true;
