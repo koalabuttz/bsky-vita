@@ -50,6 +50,7 @@ const FIELD_HEIGHT: f32 = 40.0;
 
 const HANDLE_RECT: Rect = Rect::new(FIELD_LEFT, 200.0, FIELD_WIDTH, FIELD_HEIGHT);
 const PASSWORD_RECT: Rect = Rect::new(FIELD_LEFT, 280.0, FIELD_WIDTH, FIELD_HEIGHT);
+const PASSWORD_VISIBILITY_RECT: Rect = Rect::new(FIELD_LEFT + FIELD_WIDTH - 180.0, 327.0, 180.0, 30.0);
 const PRIMARY_BTN_RECT: Rect = Rect::new(FIELD_LEFT, 370.0, FIELD_WIDTH, 50.0);
 const TOGGLE_LINK_RECT: Rect = Rect::new(FIELD_LEFT, 440.0, FIELD_WIDTH, 28.0);
 
@@ -106,6 +107,8 @@ enum LoginState {
 pub struct LoginScreen {
     handle: FieldState,
     password: FieldState,
+    password_visible: bool,
+    password_visibility_btn: ButtonState,
     primary_btn: ButtonState,
     toggle_link_btn: ButtonState,
     cancel_btn: ButtonState,
@@ -144,6 +147,8 @@ impl LoginScreen {
         Self {
             handle: FieldState::default(),
             password: FieldState::default(),
+            password_visible: false,
+            password_visibility_btn: ButtonState::default(),
             primary_btn: ButtonState::default(),
             toggle_link_btn: ButtonState::default(),
             cancel_btn: ButtonState::default(),
@@ -164,6 +169,11 @@ impl LoginScreen {
         let mut s = Self::new();
         s.state = LoginState::Idle;
         s
+    }
+
+    fn password_editor(&self) -> (TextBoxMode, &str) {
+        let mode = if self.password_visible { TextBoxMode::Default } else { TextBoxMode::Password };
+        (mode, &self.password.value)
     }
 }
 
@@ -296,9 +306,14 @@ impl Screen for LoginScreen {
                     "app password (xxxx-xxxx-xxxx-xxxx)",
                     &mut self.password,
                     ctx,
-                    true,
+                    !self.password_visible,
                     interactive,
                 );
+                let visibility_label = if self.password_visible { "Hide password" } else { "Show password" };
+                if button(frame, font, PASSWORD_VISIBILITY_RECT, visibility_label,
+                    &mut self.password_visibility_btn, ctx, interactive) {
+                    self.password_visible = !self.password_visible;
+                }
                 let l = button(
                     frame,
                     font,
@@ -392,18 +407,21 @@ impl Screen for LoginScreen {
             self.transition_to_idle();
             self.password.focused = true;
             self.focus = Focus::Password;
+            let (textbox_mode, initial_text) = self.password_editor();
             let _ = ime.open(
                 "App password",
                 ImeMode::BasicLatin,
-                TextBoxMode::Password,
+                textbox_mode,
                 64,
-                "",
+                initial_text,
             );
         }
         if primary_clicked {
+            self.password_visible = false;
             self.handle_primary(primary_label);
         }
         if t_clicked {
+            self.password_visible = false;
             self.mode = match self.mode {
                 Mode::OAuth => Mode::AppPassword,
                 Mode::AppPassword => Mode::OAuth,
@@ -624,5 +642,21 @@ fn into_auth_client_oauth(result: OAuthLoginResult) -> AuthClient {
     AuthClient {
         agent: AuthAgent::OAuth(agent),
         resolved,
+    }
+}
+
+#[cfg(test)]
+mod password_visibility_tests {
+    use super::*;
+    #[test]
+    fn editor_starts_hidden_and_preserves_text_when_visibility_changes() {
+        let mut login = LoginScreen::idle();
+        login.password.value = "abcd-efgh-ijkl-mnop".into();
+        assert_eq!(login.password_editor(), (TextBoxMode::Password, "abcd-efgh-ijkl-mnop"));
+        login.password_visible = true;
+        assert_eq!(login.password_editor(), (TextBoxMode::Default, "abcd-efgh-ijkl-mnop"));
+        login.password_visible = false;
+        assert_eq!(login.password_editor(), (TextBoxMode::Password, "abcd-efgh-ijkl-mnop"));
+        assert!(!LoginScreen::idle().password_visible);
     }
 }
