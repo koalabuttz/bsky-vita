@@ -412,6 +412,8 @@ pub enum WorkResponse {
     FollowChanged(Result<Option<String>, String>),
     Thread(Result<ThreadBatch, String>),
     Notifications(Result<NotificationBatch, String>),
+    /// Completion of MarkSeen; carries no list data, even for an empty inbox.
+    NotificationsSeen,
     SearchActors(Result<ActorsBatch, String>),
     SearchPosts(Result<PostsBatch, String>),
     /// `Ok(file_path)` when the video blob is downloaded (or was
@@ -797,12 +799,7 @@ fn handle_request(
             {
                 bsky_log::log!("update_seen failed: {e}");
             }
-            // Reuse Notifications response just to fit the WorkResponse
-            // shape; the inner Ok with empty batch carries no data.
-            WorkResponse::Notifications(Ok(NotificationBatch {
-                notifications: Vec::new(),
-                cursor: None,
-            }))
+            WorkResponse::NotificationsSeen
         }
         WorkRequest::FetchConvos { cursor } => fetch_convos(client, cursor),
         WorkRequest::GetConvoMessages { convo_id, cursor } => {

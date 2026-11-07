@@ -1216,7 +1216,7 @@ impl Screen for TimelineScreen {
             // Follow responses belong to ProfileScreen.
             WorkResponse::FollowChanged(_) => {}
             // Notifications belong to NotificationsScreen.
-            WorkResponse::Notifications(_) => {}
+            WorkResponse::Notifications(_) | WorkResponse::NotificationsSeen => {}
             // Search results belong to SearchScreen.
             WorkResponse::SearchActors(_) | WorkResponse::SearchPosts(_) => {}
             // Video blob responses belong to VideoPlayerScreen.

@@ -1549,7 +1549,7 @@ impl Screen for ProfileScreen {
             }
             // Search results belong to SearchScreen.
             WorkResponse::SearchActors(_) | WorkResponse::SearchPosts(_) => {}
-            WorkResponse::Notifications(_) => {}
+            WorkResponse::Notifications(_) | WorkResponse::NotificationsSeen => {}
             WorkResponse::VideoBlob { .. } | WorkResponse::VideoBlobProgress { .. } => {}
             // The "Message" button's getConvoForMembers result: stash the
             // convo to open on the next frame (or surface the error).

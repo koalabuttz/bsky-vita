@@ -343,11 +343,6 @@ impl Screen for NotificationsScreen {
         match resp {
             WorkResponse::Notifications(Ok(batch)) => {
                 self.fetching_more = false;
-                // MarkSeen response carries an empty batch; ignore so we
-                // don't replace real notifications.
-                if batch.notifications.is_empty() && batch.cursor.is_none() {
-                    return;
-                }
                 match &mut self.state {
                     NotifState::Loaded {
                         notifications,
@@ -383,6 +378,79 @@ impl Screen for NotificationsScreen {
 enum NotifTapAction {
     OpenThread(String),
     OpenProfile(String),
+}
+
+#[cfg(test)]
+mod empty_inbox_tests {
+    use super::*;
+    use atrium_api::agent::atp_agent::AtpAgent;
+    use bsky_auth::{AuthAgent, FileSessionStore, PdsClient, ResolvedIdentity};
+    use bsky_worker::NotificationBatch;
+
+    fn screen() -> NotificationsScreen {
+        NotificationsScreen::new(Arc::new(AuthClient {
+            agent: AuthAgent::Password(AtpAgent::new(
+                PdsClient::new(Arc::new(Default::default()), "https://unused.invalid"),
+                FileSessionStore::new("/unused/notifications-test.json"),
+            )),
+            resolved: ResolvedIdentity {
+                did: "did:plc:test".into(),
+                pds: "https://unused.invalid".into(),
+            },
+        }))
+    }
+
+    fn empty_page() -> WorkResponse {
+        WorkResponse::Notifications(Ok(NotificationBatch {
+            notifications: Vec::new(),
+            cursor: None,
+        }))
+    }
+
+    #[test]
+    fn an_empty_first_page_finishes_loading() {
+        let mut screen = screen();
+        screen.handle_worker_response(empty_page());
+        assert!(
+            matches!(screen.state, NotifState::Loaded { ref notifications, next_cursor: None }
+            if notifications.is_empty())
+        );
+    }
+
+    #[test]
+    fn mark_seen_acknowledgement_never_changes_the_list_state() {
+        let mut screen = screen();
+        screen.handle_worker_response(WorkResponse::NotificationsSeen);
+        assert!(matches!(screen.state, NotifState::Loading));
+        screen.state = NotifState::Loaded {
+            notifications: Vec::new(),
+            next_cursor: Some("next".into()),
+        };
+        screen.handle_worker_response(WorkResponse::NotificationsSeen);
+        assert!(
+            matches!(screen.state, NotifState::Loaded { next_cursor: Some(ref cursor), .. }
+            if cursor == "next")
+        );
+    }
+
+    #[test]
+    fn an_empty_final_page_clears_the_pagination_cursor() {
+        let mut screen = screen();
+        screen.state = NotifState::Loaded {
+            notifications: Vec::new(),
+            next_cursor: Some("next".into()),
+        };
+        screen.fetching_more = true;
+        screen.handle_worker_response(empty_page());
+        assert!(!screen.fetching_more);
+        assert!(matches!(
+            screen.state,
+            NotifState::Loaded {
+                next_cursor: None,
+                ..
+            }
+        ));
+    }
 }
 
 /// Decide what tapping a notification should do based on its reason.
