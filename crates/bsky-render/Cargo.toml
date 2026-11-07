@@ -19,7 +19,7 @@ bsky-log = { path = "../bsky-log" }
 # RGBA buffer via `to_vec()` directly).
 qrcode = { workspace = true }
 unicode-segmentation = { workspace = true }
-unicode-properties = { version = "0.1.4", features = ["emoji"] }
+unicode-properties = { version = "0.1.5", features = ["emoji"] }
 
 [target.'cfg(target_os = "vita")'.dependencies]
 vitasdk-sys = { workspace = true }

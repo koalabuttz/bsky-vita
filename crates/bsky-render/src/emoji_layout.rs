@@ -138,6 +138,28 @@ mod tests {
     }
 
     #[test]
+    fn recognizes_unicode_18_emoji() {
+        for emoji in [
+            "\u{1f6d9}",
+            "\u{1fa8b}",
+            "\u{1fa8c}",
+            "\u{1fa8d}",
+            "\u{1facc}",
+            "\u{1fadd}",
+            "\u{1faeb}",
+            "\u{1faf9}",
+            "\u{1fafa}",
+            "\u{1faf9}\u{1f3fd}",
+        ] {
+            assert_eq!(
+                tokens(emoji, |_| true),
+                vec![Token::Emoji(emoji)],
+                "Unicode 18 emoji must reach the emoji font: {emoji:?}",
+            );
+        }
+    }
+
+    #[test]
     fn layout_and_truncation_keep_cluster_boundaries_and_blank_lines() {
         assert_eq!(
             layout("a\n\nb", 20, 1, |s| s.len() as i32),
