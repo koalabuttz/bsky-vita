@@ -171,6 +171,7 @@ fn main() {
         // (expired/revoked) → fall back to login after the drain.
         let mut session_dead = false;
         if let Some(w) = worker.as_ref() {
+            let mut texture_updates = texture_cache.updates();
             while let Some(resp) = w.try_recv() {
                 let resp = if let WorkResponse::Image { url, bytes: Ok(b) } = &resp {
                     if !url.starts_with("http") {
@@ -187,17 +188,13 @@ fn main() {
                         // pixels (the vertical black/red stripe bug). insert_rgba
                         // forces a 4 bpp copy; other images stay 3 bpp via insert.
                         let is_avatar = url.contains("/avatar_thumbnail/");
-                        let inserted = if is_avatar {
-                            texture_cache.insert_rgba(url.clone(), b)
-                        } else {
-                            texture_cache.insert(url.clone(), b)
-                        };
+                        let inserted = texture_updates.insert(url.clone(), b, is_avatar);
                         match inserted {
                             Ok(()) => {
                                 // Circular alpha mask so avatars composite
                                 // cleanly over arbitrary backgrounds (banners).
                                 if is_avatar {
-                                    if let Some(tex) = texture_cache.get(url) {
+                                    if let Some(tex) = texture_updates.get(url) {
                                         tex.apply_circular_mask();
                                     }
                                 }
@@ -207,7 +204,7 @@ fn main() {
                                 bsky_log::log!("decode failed for {url}: {e}");
                                 WorkResponse::Image {
                                     url: url.clone(),
-                                    bytes: Err(format!("decode: {e}")),
+                                    bytes: Err(bsky_worker::ReadError::permanent(format!("decode: {e}"))),
                                 }
                             }
                         }
@@ -215,6 +212,11 @@ fn main() {
                 } else {
                     resp
                 };
+                if let WorkResponse::Image { url, bytes: Err(error) } = &resp {
+                    if url.starts_with("http") {
+                        texture_updates.image_failed(url, error.retryable);
+                    }
+                }
                 let dead = resp.auth_failed();
                 if let Some(top) = screen_stack.last_mut() {
                     top.handle_worker_response(resp);
@@ -246,8 +248,10 @@ fn main() {
                 handle_switch_tab(target, &mut screen_stack, auth_client.as_ref());
             }
             ScreenAction::AuthComplete { client, next } => {
+                texture_cache.reset_image_requests();
                 worker = Some(Worker::spawn(Arc::clone(&client)));
                 auth_client = Some(client);
+                bsky_render::wait_rendering_done();
                 screen_stack.clear();
                 screen_stack.push(next);
             }
@@ -294,6 +298,7 @@ fn teardown_to_login(
     ]);
     *worker = None;
     *auth_client = None;
+    bsky_render::wait_rendering_done();
     screen_stack.clear();
     screen_stack.push(Box::new(LoginScreen::idle()));
 }
@@ -310,6 +315,7 @@ fn handle_switch_tab(
     auth: Option<&Arc<AuthClient>>,
 ) {
     if let Some(idx) = stack.iter().position(|s| s.top_level() == Some(target)) {
+        bsky_render::wait_rendering_done();
         stack.truncate(idx + 1);
         return;
     }
@@ -318,6 +324,7 @@ fn handle_switch_tab(
         return;
     };
     let next = make_top_level(target, Arc::clone(client));
+    bsky_render::wait_rendering_done();
     stack.clear();
     stack.push(next);
 }

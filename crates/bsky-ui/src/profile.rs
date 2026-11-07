@@ -177,12 +177,6 @@ pub struct ProfileScreen {
     /// this session. Without this we'd re-dispatch every frame while
     /// the response is in flight.
     dispatched: bool,
-    /// Avatar URL we've dispatched a fetch for; suppresses re-dispatch
-    /// while in flight. Cleared on `WorkResponse::Image`.
-    inflight_avatar: Option<String>,
-    /// Banner URL we've dispatched a fetch for. Same suppress-while-
-    /// in-flight pattern as avatar.
-    inflight_banner: Option<String>,
     /// Tab bar (only rendered for the own-profile / top-level instance;
     /// pushed-sub-screen instances with `actor: Some(_)` skip rendering
     /// it because they're below the tab bar in the navigation stack).
@@ -253,8 +247,6 @@ impl ProfileScreen {
             actor,
             state: ProfileState::Pending,
             dispatched: false,
-            inflight_avatar: None,
-            inflight_banner: None,
             tab_bar: TabBar::new(TopLevel::Profile),
             follow_btn: ButtonState::default(),
             message_btn: ButtonState::default(),
@@ -727,24 +719,10 @@ impl Screen for ProfileScreen {
         // URL; banners use the full-size CDN URL with @jpeg coercion.
         if let ProfileState::Loaded(p) = &self.state {
             if let Some(url) = p.avatar.as_deref().map(avatar_thumbnail_jpeg) {
-                if !ctx.texture_cache.contains(&url)
-                    && self.inflight_avatar.as_deref() != Some(url.as_str())
-                {
-                    if let Some(worker) = ctx.worker {
-                        worker.send(WorkRequest::FetchImage { url: url.clone() });
-                        self.inflight_avatar = Some(url);
-                    }
-                }
+                ctx.request_image(&url);
             }
             if let Some(url) = p.banner.as_deref().map(banner_jpeg) {
-                if !ctx.texture_cache.contains(&url)
-                    && self.inflight_banner.as_deref() != Some(url.as_str())
-                {
-                    if let Some(worker) = ctx.worker {
-                        worker.send(WorkRequest::FetchImage { url: url.clone() });
-                        self.inflight_banner = Some(url);
-                    }
-                }
+                ctx.request_image(&url);
             }
         }
 
@@ -1476,16 +1454,7 @@ impl Screen for ProfileScreen {
             }
             // Saved-feeds responses belong to TimelineScreen.
             WorkResponse::SavedFeeds(_) => {}
-            // Image responses: cache is updated in main.rs; we just clear
-            // our in-flight tracker so a future cache-miss can re-dispatch.
-            WorkResponse::Image { url, .. } => {
-                if self.inflight_avatar.as_deref() == Some(&url) {
-                    self.inflight_avatar = None;
-                }
-                if self.inflight_banner.as_deref() == Some(&url) {
-                    self.inflight_banner = None;
-                }
-            }
+            WorkResponse::Image { .. } => {}
             WorkResponse::PostCreated(_) | WorkResponse::PostDeleted { .. } => {}
             // Resolve the in-flight PENDING_URI sentinel on any
             // post-shaped tab's post so subsequent un-like / un-repost
@@ -2005,6 +1974,7 @@ fn draw_posts_content(
                 ctx.emoji,
             );
         }
+        ctx.request_post_images(post);
         draw_post_row(
             frame,
             font,
@@ -2057,14 +2027,14 @@ fn draw_feeds_content(
     }
     // Dispatch avatar fetches for the visible rows so feed-creator
     // avatars get into the cache.
-    if let Some(worker) = ctx.worker {
+    if ctx.worker.is_some() {
         for (i, item) in state.items.iter().enumerate() {
             let row_y = content_top_y + (i as i32) * NON_POST_ROW_H;
             let row_bottom = row_y + NON_POST_ROW_H;
             if row_bottom > pill_bottom && row_y < viewport_bottom {
                 if let Some(url) = item.avatar.as_deref().map(avatar_thumbnail_jpeg) {
                     if !ctx.texture_cache.contains(&url) {
-                        worker.send(WorkRequest::FetchImage { url });
+                        ctx.request_image(&url);
                     }
                 }
             }
@@ -2215,14 +2185,14 @@ fn draw_lists_content(
         frame.draw_text_centered(font, pill_bottom + 30, theme::TEXT_MUTED, 0.95, label);
         return;
     }
-    if let Some(worker) = ctx.worker {
+    if ctx.worker.is_some() {
         for (i, item) in state.items.iter().enumerate() {
             let row_y = content_top_y + (i as i32) * NON_POST_ROW_H;
             let row_bottom = row_y + NON_POST_ROW_H;
             if row_bottom > pill_bottom && row_y < viewport_bottom {
                 if let Some(url) = item.avatar.as_deref().map(avatar_thumbnail_jpeg) {
                     if !ctx.texture_cache.contains(&url) {
-                        worker.send(WorkRequest::FetchImage { url });
+                        ctx.request_image(&url);
                     }
                 }
             }
@@ -2365,14 +2335,14 @@ fn draw_packs_content(
         frame.draw_text_centered(font, pill_bottom + 30, theme::TEXT_MUTED, 0.95, label);
         return;
     }
-    if let Some(worker) = ctx.worker {
+    if ctx.worker.is_some() {
         for (i, item) in state.items.iter().enumerate() {
             let row_y = content_top_y + (i as i32) * NON_POST_ROW_H;
             let row_bottom = row_y + NON_POST_ROW_H;
             if row_bottom > pill_bottom && row_y < viewport_bottom {
                 if let Some(url) = item.creator.avatar.as_deref().map(avatar_thumbnail_jpeg) {
                     if !ctx.texture_cache.contains(&url) {
-                        worker.send(WorkRequest::FetchImage { url });
+                        ctx.request_image(&url);
                     }
                 }
             }

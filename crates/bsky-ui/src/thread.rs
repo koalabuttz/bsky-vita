@@ -19,7 +19,6 @@
 //! URI (parents[0] if any, else main) — fixing the 4.2 MVP simplification
 //! that used parent-as-root for direct replies in TimelineScreen.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -65,7 +64,6 @@ pub struct ThreadScreen {
     selected_idx: usize,
     dispatched: bool,
     row_heights: Vec<i32>,
-    inflight_avatars: HashSet<String>,
     /// Set on Thread response. Triggers a one-shot scroll-to-main on
     /// the first frame after row_heights are measured (otherwise the
     /// thread renders with scroll_y = 0, which puts the main post off
@@ -92,7 +90,6 @@ impl ThreadScreen {
             selected_idx: 0,
             dispatched: false,
             row_heights: Vec::new(),
-            inflight_avatars: HashSet::new(),
             pending_scroll_to_main: false,
             delete_armed_at: None,
             delete_error: None,
@@ -422,19 +419,14 @@ impl Screen for ThreadScreen {
 
         // Avatar dispatch for visible posts.
         if let ThreadState::Loaded { posts, .. } = &self.state {
-            if let Some(worker) = ctx.worker {
+            if ctx.worker.is_some() {
                 let mut y_probe = HEADER_H - self.scroll_y as i32;
                 for (post, &row_h) in posts.iter().zip(self.row_heights.iter()) {
                     let row_bottom = y_probe + row_h;
                     if row_bottom > HEADER_H && y_probe < SCREEN_HEIGHT {
                         if let Some(url) = post.post.author.avatar.as_ref() {
                             let url = avatar_thumbnail_jpeg(url);
-                            if !ctx.texture_cache.contains(&url)
-                                && !self.inflight_avatars.contains(&url)
-                            {
-                                worker.send(WorkRequest::FetchImage { url: url.clone() });
-                                self.inflight_avatars.insert(url);
-                            }
+                            ctx.request_image(&url);
                         }
                     }
                     y_probe += row_h;
@@ -471,6 +463,7 @@ impl Screen for ThreadScreen {
                                 theme::ACCENT,
                             );
                         }
+                        ctx.request_post_images(post);
                         draw_post_row(
                             frame,
                             font,
@@ -605,9 +598,7 @@ impl Screen for ThreadScreen {
                     }
                 }
             }
-            WorkResponse::Image { url, .. } => {
-                self.inflight_avatars.remove(&url);
-            }
+            WorkResponse::Image { .. } => {}
             // Delete ack for a post we deleted from this thread.
             WorkResponse::PostDeleted { result, .. } => match result {
                 Ok(()) => self.just_deleted = true,

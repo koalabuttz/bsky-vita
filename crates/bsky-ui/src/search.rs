@@ -6,7 +6,6 @@
 //! full timeline-style post rows. Tap an actor → their profile; tap a
 //! post → its thread.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use atrium_api::app::bsky::actor::defs::ProfileView;
@@ -59,7 +58,6 @@ pub struct SearchScreen {
     selected_idx: usize,
     scroll_y: f32,
     row_heights: Vec<i32>,
-    inflight_avatars: HashSet<String>,
     query_btn: ButtonState,
     people_btn: ButtonState,
     posts_btn: ButtonState,
@@ -76,7 +74,6 @@ impl SearchScreen {
             selected_idx: 0,
             scroll_y: 0.0,
             row_heights: Vec::new(),
-            inflight_avatars: HashSet::new(),
             query_btn: ButtonState::default(),
             people_btn: ButtonState::default(),
             posts_btn: ButtonState::default(),
@@ -218,7 +215,7 @@ impl Screen for SearchScreen {
         self.scroll_y = self.scroll_y.clamp(0.0, max_scroll);
 
         // Avatar dispatch for visible result rows.
-        if let Some(worker) = ctx.worker {
+        if ctx.worker.is_some() {
             let mut y_probe = RESULTS_TOP - self.scroll_y as i32;
             let avatars: Vec<Option<&str>> = match &self.state {
                 SearchState::Actors(v) => v.iter().map(|a| a.avatar.as_deref()).collect(),
@@ -232,12 +229,7 @@ impl Screen for SearchScreen {
                 if row_bottom > RESULTS_TOP && y_probe < VIEWPORT_BOTTOM {
                     if let Some(url) = avatar {
                         let url = avatar_thumbnail_jpeg(url);
-                        if !ctx.texture_cache.contains(&url)
-                            && !self.inflight_avatars.contains(&url)
-                        {
-                            worker.send(WorkRequest::FetchImage { url: url.clone() });
-                            self.inflight_avatars.insert(url);
-                        }
+                        ctx.request_image(&url);
                     }
                 }
                 y_probe += row_h;
@@ -309,6 +301,7 @@ impl Screen for SearchScreen {
                     {
                         let row_bottom = y + row_h;
                         if row_bottom > RESULTS_TOP && y < VIEWPORT_BOTTOM {
+                            ctx.request_post_images(post);
                             draw_post_row(
                                 frame,
                                 font,
@@ -621,9 +614,7 @@ impl Screen for SearchScreen {
             WorkResponse::SearchPosts(Err(e)) => {
                 self.state = SearchState::Error(e);
             }
-            WorkResponse::Image { url, .. } => {
-                self.inflight_avatars.remove(&url);
-            }
+            WorkResponse::Image { .. } => {}
             _ => {}
         }
     }

@@ -9,11 +9,10 @@
 use bsky_ime::Ime;
 use bsky_input::buttons;
 use bsky_render::{theme, Color, Font, Frame, SCREEN_HEIGHT, SCREEN_WIDTH};
-use bsky_worker::{WorkRequest, WorkResponse};
 
 use crate::embeds::ViewerImage;
 use crate::screen::{Screen, ScreenAction};
-use crate::widget::UiCtx;
+use crate::widget::{button, ButtonState, Rect, UiCtx};
 
 const BAR_H: i32 = 30;
 const ALT_BAND_H: i32 = 44;
@@ -21,8 +20,8 @@ const ALT_BAND_H: i32 = 44;
 pub struct ImageViewerScreen {
     images: Vec<ViewerImage>,
     index: usize,
-    /// fullsize URL currently being fetched (suppresses re-dispatch).
-    inflight: Option<String>,
+    retry_on_open: bool,
+    retry_btn: ButtonState,
     /// Release-edge state for tap-to-close.
     close_pressed_last: bool,
     /// Tap-to-close is armed only after the touch that OPENED the viewer
@@ -37,7 +36,8 @@ impl ImageViewerScreen {
         Self {
             images,
             index,
-            inflight: None,
+            retry_on_open: true,
+            retry_btn: ButtonState::default(),
             close_pressed_last: false,
             armed: false,
         }
@@ -64,17 +64,14 @@ impl Screen for ImageViewerScreen {
         }
         let img = &self.images[self.index];
 
-        // Fetch the fullsize if not cached / not already requested.
-        if !ctx.texture_cache.contains(&img.fullsize)
-            && self.inflight.as_deref() != Some(img.fullsize.as_str())
-        {
-            if let Some(worker) = ctx.worker {
-                worker.send(WorkRequest::FetchImage {
-                    url: img.fullsize.clone(),
-                });
-                self.inflight = Some(img.fullsize.clone());
-            }
+        // Opening an image is also the feed placeholder's manual retry action.
+        if self.retry_on_open {
+            ctx.texture_cache.retry_image(&img.thumb);
+            ctx.texture_cache.retry_image(&img.fullsize);
+            ctx.request_image(&img.thumb);
+            self.retry_on_open = false;
         }
+        ctx.request_image(&img.fullsize);
 
         let band_h = if img.alt.is_empty() { 0 } else { ALT_BAND_H };
         let img_bottom = SCREEN_HEIGHT - band_h;
@@ -95,7 +92,19 @@ impl Screen for ImageViewerScreen {
             let dy = BAR_H as f32 + (avail_h as f32 - dh) / 2.0;
             frame.draw_texture_scale(tex, dx, dy, s, s);
         } else {
-            frame.draw_text_centered(font, SCREEN_HEIGHT / 2, theme::TEXT_MUTED, 0.9, "Loading…");
+            let label = if ctx.texture_cache.image_has_failed(&img.fullsize) {
+                "Image could not be loaded"
+            } else { "Loading image..." };
+            frame.draw_text_centered(font, SCREEN_HEIGHT / 2, theme::TEXT_MUTED, 0.9, label);
+        }
+
+        let retry_rect = Rect::new(380.0, (img_bottom - 54) as f32, 200.0, 42.0);
+        let failed = ctx.texture_cache.image_has_failed(&img.fullsize);
+        if failed && button(frame, font, retry_rect, "Retry image", &mut self.retry_btn, ctx, self.armed) {
+            ctx.texture_cache.retry_image(&img.fullsize);
+            ctx.request_image(&img.fullsize);
+            self.close_pressed_last = false;
+            return ScreenAction::None;
         }
 
         // Top bar: page indicator + close hint.
@@ -125,9 +134,11 @@ impl Screen for ImageViewerScreen {
         if self.images.len() > 1 {
             if ctx.pad.just_pressed(buttons::LEFT) && self.index > 0 {
                 self.index -= 1;
+                self.retry_on_open = true;
             }
             if ctx.pad.just_pressed(buttons::RIGHT) && self.index + 1 < self.images.len() {
                 self.index += 1;
+                self.retry_on_open = true;
             }
         }
 
@@ -138,7 +149,8 @@ impl Screen for ImageViewerScreen {
             self.armed = true;
         }
         let in_image =
-            self.armed && ctx.touches.iter().any(|t| t.y > BAR_H && t.y < img_bottom);
+            self.armed && ctx.touches.iter().any(|t| t.y > BAR_H && t.y < img_bottom
+                && !(failed && retry_rect.contains(t.x, t.y)));
         let tapped = self.close_pressed_last && !in_image && ctx.touches.is_empty();
         self.close_pressed_last = in_image;
         if tapped
@@ -150,11 +162,4 @@ impl Screen for ImageViewerScreen {
         ScreenAction::None
     }
 
-    fn handle_worker_response(&mut self, resp: WorkResponse) {
-        if let WorkResponse::Image { url, .. } = resp {
-            if self.inflight.as_deref() == Some(url.as_str()) {
-                self.inflight = None;
-            }
-        }
-    }
 }

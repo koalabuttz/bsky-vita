@@ -35,6 +35,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashSet;
+pub use bsky_net::ReadError;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
@@ -387,7 +388,7 @@ pub enum WorkResponse {
     /// entry / clear the right "in-flight" tracker.
     Image {
         url: String,
-        bytes: Result<Vec<u8>, String>,
+        bytes: Result<Vec<u8>, ReadError>,
     },
     /// AT-URI of the just-created post on success; error string on
     /// failure (lexicon validation, network, auth, etc.).
@@ -729,7 +730,7 @@ fn handle_request(
             WorkResponse::Image { url, bytes }
         }
         WorkRequest::ReadImageFile { path } => {
-            let bytes = std::fs::read(&path).map_err(|e| format!("read {path}: {e}"));
+            let bytes = std::fs::read(&path).map_err(|e| ReadError::permanent(format!("read {path}: {e}")));
             WorkResponse::Image { url: path, bytes }
         }
         WorkRequest::CreateThread { segments, reply_to } => {
@@ -2031,6 +2032,6 @@ fn fetch_video_blob(
 /// [`bsky_net::MAX_IMAGE_BYTES`] so an oversized or hostile image can't OOM
 /// the device. Uses a fresh VitaHttpClient (no auth) — the CDN endpoints
 /// (cdn.bsky.app) don't require Bearer tokens.
-fn fetch_image_bytes(url: &str) -> Result<Vec<u8>, String> {
+fn fetch_image_bytes(url: &str) -> Result<Vec<u8>, ReadError> {
     VitaHttpClient::new().get_bytes_capped(url, bsky_net::MAX_IMAGE_BYTES)
 }

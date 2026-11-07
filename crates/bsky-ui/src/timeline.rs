@@ -24,7 +24,6 @@
 //! - Repost / reply context ("X reposted", "Replying to @Y").
 //! - Tap-a-post → thread view (Phase 4+).
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use atrium_api::app::bsky::feed::defs::{FeedViewPost, FeedViewPostReasonRefs, ReplyRefParentRefs};
@@ -139,11 +138,6 @@ pub struct TimelineScreen {
     /// Cached row heights, parallel to `posts` in TimelineState::Loaded.
     /// Lazily extended in `frame()` when posts.len() > row_heights.len().
     row_heights: Vec<i32>,
-    /// Avatar URLs we've dispatched fetches for AND haven't received a
-    /// successful response for. On Ok response → cleared (allows re-fetch
-    /// after eviction). On Err response → kept (don't retry-storm a
-    /// failing URL during this session).
-    inflight_avatars: HashSet<String>,
     /// Index into `posts` of the currently-focused row. D-pad up/down
     /// moves this; gamepad shortcuts (L = like, R = reply, TRIANGLE =
     /// repost) act on this row. The viewport auto-scrolls to keep the
@@ -184,7 +178,6 @@ impl TimelineScreen {
             dispatched: false,
             fetching_more: false,
             row_heights: Vec::new(),
-            inflight_avatars: HashSet::new(),
             selected_idx: 0,
             tab_bar: TabBar::new(TopLevel::Home),
             is_pushed,
@@ -672,7 +665,7 @@ impl Screen for TimelineScreen {
         // FetchImage request. The actual render uses the cache; misses
         // show a placeholder.
         if let TimelineState::Loaded { posts, .. } = &self.state {
-            if let Some(worker) = ctx.worker {
+            if ctx.worker.is_some() {
                 let mut y_probe = VIEWPORT_TOP - self.scroll_y as i32;
                 for (post, &row_h) in posts.iter().zip(self.row_heights.iter()) {
                     let row_bottom = y_probe + row_h;
@@ -681,23 +674,13 @@ impl Screen for TimelineScreen {
                             // Transform the URL so cache lookup and fetch
                             // use the same vita2d-compatible JPEG variant.
                             let url = avatar_thumbnail_jpeg(url);
-                            if !ctx.texture_cache.contains(&url)
-                                && !self.inflight_avatars.contains(&url)
-                            {
-                                worker.send(WorkRequest::FetchImage { url: url.clone() });
-                                self.inflight_avatars.insert(url);
-                            }
+                            ctx.request_image(&url);
                         }
                         // Embed image URLs (post images, link card thumb,
                         // video thumb, quote-author avatar). These are
                         // already CDN-resolved JPEGs.
                         for url in crate::embeds::embed_image_urls(post.post.embed.as_ref()) {
-                            if !ctx.texture_cache.contains(&url)
-                                && !self.inflight_avatars.contains(&url)
-                            {
-                                worker.send(WorkRequest::FetchImage { url: url.clone() });
-                                self.inflight_avatars.insert(url);
-                            }
+                            ctx.request_image(&url);
                         }
                     }
                     y_probe += row_h;
@@ -706,14 +689,11 @@ impl Screen for TimelineScreen {
         }
 
         // ─── 5c. Avatar dispatch for pill row. ────────────────────────
-        if let Some(worker) = ctx.worker {
+        if ctx.worker.is_some() {
             for pin in self.saved_feeds.iter() {
                 if let Some(url) = pin.avatar_url.as_ref() {
                     let url = avatar_thumbnail_jpeg(url);
-                    if !ctx.texture_cache.contains(&url) && !self.inflight_avatars.contains(&url) {
-                        worker.send(WorkRequest::FetchImage { url: url.clone() });
-                        self.inflight_avatars.insert(url);
-                    }
+                    ctx.request_image(&url);
                 }
             }
         }
@@ -1099,18 +1079,8 @@ impl Screen for TimelineScreen {
             // dispatched one and the user transitioned before the response
             // landed. Ignore them — ProfileScreen is gone.
             WorkResponse::Profile(_) => {}
-            // Image responses. On Ok: cache populated by main.rs; clear
-            // inflight so future evict + re-fetch works. On Err: KEEP
-            // url in inflight_avatars permanently for this session, so
-            // we don't retry-storm. (Phase 4 may add a manual retry.)
-            WorkResponse::Image { url, bytes } => match bytes {
-                Ok(_) => {
-                    self.inflight_avatars.remove(&url);
-                }
-                Err(_) => {
-                    // Leave url in inflight_avatars (don't retry).
-                }
-            },
+            // Network image state is shared by all screens in TextureCache.
+            WorkResponse::Image { .. } => {}
             // PostCreated belongs to ComposeScreen — if it lands here
             // it's because the user popped out of compose before the
             // response arrived. Drop silently.

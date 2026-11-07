@@ -22,7 +22,6 @@
 //! - Filtering by reason (Bluesky's "Mentions" / "Likes" tabs).
 //! - Real-time unread badge on the tab bar Notifs cell.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use atrium_api::app::bsky::notification::list_notifications::Notification;
@@ -69,7 +68,6 @@ pub struct NotificationsScreen {
     fetching_more: bool,
     marked_seen: bool,
     row_heights: Vec<i32>,
-    inflight_avatars: HashSet<String>,
     tab_bar: TabBar,
 }
 
@@ -84,7 +82,6 @@ impl NotificationsScreen {
             fetching_more: false,
             marked_seen: false,
             row_heights: Vec::new(),
-            inflight_avatars: HashSet::new(),
             tab_bar: TabBar::new(TopLevel::Notifications),
         }
     }
@@ -187,19 +184,14 @@ impl Screen for NotificationsScreen {
 
         // Avatar dispatch for visible rows.
         if let NotifState::Loaded { notifications, .. } = &self.state {
-            if let Some(worker) = ctx.worker {
+            if ctx.worker.is_some() {
                 let mut y_probe = HEADER_H - self.scroll_y as i32;
                 for (notif, &row_h) in notifications.iter().zip(self.row_heights.iter()) {
                     let row_bottom = y_probe + row_h;
                     if row_bottom > VIEWPORT_TOP && y_probe < VIEWPORT_BOTTOM {
                         if let Some(url) = notif.author.avatar.as_ref() {
                             let url = avatar_thumbnail_jpeg(url);
-                            if !ctx.texture_cache.contains(&url)
-                                && !self.inflight_avatars.contains(&url)
-                            {
-                                worker.send(WorkRequest::FetchImage { url: url.clone() });
-                                self.inflight_avatars.insert(url);
-                            }
+                            ctx.request_image(&url);
                         }
                     }
                     y_probe += row_h;
@@ -378,9 +370,7 @@ impl Screen for NotificationsScreen {
                     self.state = NotifState::Error(e);
                 }
             }
-            WorkResponse::Image { url, .. } => {
-                self.inflight_avatars.remove(&url);
-            }
+            WorkResponse::Image { .. } => {}
             _ => {}
         }
     }

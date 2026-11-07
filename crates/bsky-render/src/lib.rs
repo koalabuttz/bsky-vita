@@ -33,6 +33,7 @@
 mod emoji_cache;
 mod emoji_font;
 mod emoji_layout;
+mod image_load;
 #[cfg(target_os = "vita")]
 mod ffi;
 #[cfg(target_os = "vita")]
@@ -1227,6 +1228,7 @@ pub struct TextureCache {
     /// Insertion / access order. Front = oldest, back = newest.
     order: VecDeque<String>,
     capacity: usize,
+    loads: std::cell::RefCell<image_load::ImageLoads>,
 }
 
 impl TextureCache {
@@ -1235,11 +1237,32 @@ impl TextureCache {
             map: HashMap::with_capacity(capacity),
             order: VecDeque::with_capacity(capacity),
             capacity,
+            loads: Default::default(),
         }
     }
 
     pub fn contains(&self, url: &str) -> bool {
         self.map.contains_key(url)
+    }
+
+    /// Reserve a shared request; deduplicates across screens and enforces backoff.
+    pub fn request_image(&self, url: &str) -> bool {
+        !self.contains(url) && self.loads.borrow_mut().request(url, std::time::Instant::now())
+    }
+    pub fn image_failed(&self, url: &str, retryable: bool) {
+        self.loads.borrow_mut().failed(url, retryable, std::time::Instant::now());
+    }
+    pub fn retry_image(&self, url: &str) { self.loads.borrow_mut().retry(url); }
+    pub fn image_has_failed(&self, url: &str) -> bool { self.loads.borrow().has_failed(url) }
+
+    /// A new worker cannot finish requests that belonged to the previous session.
+    pub fn reset_image_requests(&self) {
+        self.loads.replace(Default::default());
+    }
+
+    /// All inserts in this batch share one GPU wait, before allocation or eviction.
+    pub fn updates(&mut self) -> TextureUpdates<'_> {
+        TextureUpdates { cache: self, synchronized: false }
     }
 
     pub fn get(&self, url: &str) -> Option<&Texture> {
@@ -1264,9 +1287,7 @@ impl TextureCache {
     /// URL already exists, replaces the entry (re-decoded). Evicts the
     /// oldest entry on overflow.
     pub fn insert(&mut self, url: String, bytes: &[u8]) -> Result<(), RenderError> {
-        let texture = Texture::from_image_bytes(bytes)?;
-        self.insert_texture(url, texture);
-        Ok(())
+        self.updates().insert(url, bytes, false)
     }
 
     /// Decode `bytes` into a 4 bpp RGBA8 texture and insert. Use for
@@ -1280,9 +1301,7 @@ impl TextureCache {
     /// crisp masked edge). Non-masked images use [`insert`] and stay
     /// 3 bpp to save memory.
     pub fn insert_rgba(&mut self, url: String, bytes: &[u8]) -> Result<(), RenderError> {
-        let texture = Texture::decode_scaled(bytes, 256, 256)?;
-        self.insert_texture(url, texture);
-        Ok(())
+        self.updates().insert(url, bytes, true)
     }
 
     /// Shared LRU bookkeeping for a freshly-decoded texture: replace any
@@ -1290,6 +1309,7 @@ impl TextureCache {
     /// then insert at the most-recently-used position. (Dropping an
     /// evicted/replaced `Texture` calls `vita2d_free_texture`.)
     fn insert_texture(&mut self, url: String, texture: Texture) {
+        self.loads.borrow_mut().succeeded(&url);
         if self.map.contains_key(&url) {
             if let Some(pos) = self.order.iter().position(|u| u == &url) {
                 self.order.remove(pos);
@@ -1310,6 +1330,40 @@ impl TextureCache {
 
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
+    }
+}
+
+pub struct TextureUpdates<'a> {
+    cache: &'a mut TextureCache,
+    synchronized: bool,
+}
+
+impl TextureUpdates<'_> {
+    pub fn insert(&mut self, url: String, bytes: &[u8], rgba: bool) -> Result<(), RenderError> {
+        if !self.synchronized {
+            wait_rendering_done();
+            self.synchronized = true;
+        }
+        let texture = if rgba { Texture::decode_scaled(bytes, 256, 256)? }
+            else { Texture::from_image_bytes(bytes)? };
+        self.cache.insert_texture(url, texture);
+        Ok(())
+    }
+    pub fn get(&self, url: &str) -> Option<&Texture> { self.cache.get(url) }
+    pub fn image_failed(&self, url: &str, retryable: bool) { self.cache.image_failed(url, retryable); }
+}
+
+#[cfg(test)]
+mod image_request_tests {
+    use super::TextureCache;
+
+    #[test]
+    fn replacement_worker_can_request_abandoned_downloads() {
+        let cache = TextureCache::new(64);
+        assert!(cache.request_image("image"));
+        assert!(!cache.request_image("image"));
+        cache.reset_image_requests();
+        assert!(cache.request_image("image"));
     }
 }
 
