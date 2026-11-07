@@ -204,8 +204,7 @@ impl Screen for SearchScreen {
             } else if row_top < view_top + SCROLL_MARGIN {
                 self.scroll_y = (row_top - SCROLL_MARGIN).max(0) as f32;
             } else if row_top + row_h > view_bottom - SCROLL_MARGIN {
-                self.scroll_y =
-                    (row_top + row_h + SCROLL_MARGIN - VIEWPORT_H).max(0) as f32;
+                self.scroll_y = (row_top + row_h + SCROLL_MARGIN - VIEWPORT_H).max(0) as f32;
             }
         }
         let stick_y = ctx.pad.left_stick.1;
@@ -222,13 +221,10 @@ impl Screen for SearchScreen {
         if let Some(worker) = ctx.worker {
             let mut y_probe = RESULTS_TOP - self.scroll_y as i32;
             let avatars: Vec<Option<&str>> = match &self.state {
-                SearchState::Actors(v) => {
-                    v.iter().map(|a| a.avatar.as_deref()).collect()
+                SearchState::Actors(v) => v.iter().map(|a| a.avatar.as_deref()).collect(),
+                SearchState::Posts(v) => {
+                    v.iter().map(|p| p.post.author.avatar.as_deref()).collect()
                 }
-                SearchState::Posts(v) => v
-                    .iter()
-                    .map(|p| p.post.author.avatar.as_deref())
-                    .collect(),
                 _ => Vec::new(),
             };
             for (avatar, &row_h) in avatars.iter().zip(self.row_heights.iter()) {
@@ -309,8 +305,7 @@ impl Screen for SearchScreen {
                     );
                 } else {
                     let mut y = RESULTS_TOP - self.scroll_y as i32;
-                    for (i, (post, &row_h)) in
-                        posts.iter().zip(self.row_heights.iter()).enumerate()
+                    for (i, (post, &row_h)) in posts.iter().zip(self.row_heights.iter()).enumerate()
                     {
                         let row_bottom = y + row_h;
                         if row_bottom > RESULTS_TOP && y < VIEWPORT_BOTTOM {
@@ -351,7 +346,13 @@ impl Screen for SearchScreen {
         }
 
         // Sticky header.
-        frame.fill_rect(0.0, 0.0, SCREEN_WIDTH as f32, HEADER_H as f32, theme::FIELD_BG);
+        frame.fill_rect(
+            0.0,
+            0.0,
+            SCREEN_WIDTH as f32,
+            HEADER_H as f32,
+            theme::FIELD_BG,
+        );
         frame.draw_text_centered(font, 26, theme::TEXT_PRIMARY, 1.1, "Search");
         frame.fill_rect(
             0.0,
@@ -440,12 +441,7 @@ impl Screen for SearchScreen {
                     theme::ACCENT,
                 );
             }
-            let tab_rect = Rect::new(
-                x as f32,
-                mode_y as f32,
-                half_w as f32,
-                MODE_BAR_H as f32,
-            );
+            let tab_rect = Rect::new(x as f32, mode_y as f32, half_w as f32, MODE_BAR_H as f32);
             let state = match mode {
                 Mode::People => &mut self.people_btn,
                 Mode::Posts => &mut self.posts_btn,
@@ -499,12 +495,8 @@ impl Screen for SearchScreen {
                     for (actor, &row_h) in actors.iter().zip(self.row_heights.iter()) {
                         let row_bottom = y_probe + row_h;
                         if row_bottom > RESULTS_TOP && y_probe < VIEWPORT_BOTTOM {
-                            let row_rect = Rect::new(
-                                0.0,
-                                y_probe as f32,
-                                SCREEN_WIDTH as f32,
-                                row_h as f32,
-                            );
+                            let row_rect =
+                                Rect::new(0.0, y_probe as f32, SCREEN_WIDTH as f32, row_h as f32);
                             if touches.iter().any(|&(x, y)| row_rect.contains(x, y)) {
                                 tap_action = Some(SearchTapAction::OpenProfile(
                                     actor.handle.as_str().to_string(),
@@ -537,9 +529,9 @@ impl Screen for SearchScreen {
                                 post.post.embed.as_ref(),
                                 post.post.author.did.as_ref(),
                             ) {
-                                if let Some((ey, eh)) = crate::embeds::embed_rect(
-                                    frame, font, post, y_probe, ctx.emoji,
-                                ) {
+                                if let Some((ey, eh)) =
+                                    crate::embeds::embed_rect(frame, font, post, y_probe, ctx.emoji)
+                                {
                                     let er = Rect::new(
                                         TEXT_LEFT as f32,
                                         ey as f32,
@@ -558,13 +550,9 @@ impl Screen for SearchScreen {
                             if let Some(quote_uri) =
                                 crate::embeds::quote_uri_in_embed(post.post.embed.as_ref())
                             {
-                                if let Some((ey, eh)) = crate::embeds::embed_rect(
-                                    frame,
-                                    font,
-                                    post,
-                                    y_probe,
-                                    ctx.emoji,
-                                ) {
+                                if let Some((ey, eh)) =
+                                    crate::embeds::embed_rect(frame, font, post, y_probe, ctx.emoji)
+                                {
                                     let er = Rect::new(
                                         TEXT_LEFT as f32,
                                         ey as f32,
@@ -602,13 +590,13 @@ impl Screen for SearchScreen {
                     SearchTapAction::OpenThread(uri) => ScreenAction::Push(Box::new(
                         ThreadScreen::new(Arc::clone(&self.client), uri),
                     )),
-                    SearchTapAction::OpenVideo(target) => ScreenAction::Push(Box::new(
-                        crate::video_player::VideoPlayerScreen::new(
+                    SearchTapAction::OpenVideo(target) => {
+                        ScreenAction::Push(Box::new(crate::video_player::VideoPlayerScreen::new(
                             Arc::clone(&self.client),
                             target.did,
                             target.cid,
-                        ),
-                    )),
+                        )))
+                    }
                 };
             }
         }
@@ -728,8 +716,23 @@ fn draw_actor_row(
         .unwrap_or_else(|| actor.handle.as_str());
     let handle_str = format!("@{}", actor.handle.as_str());
     let text_x = TEXT_LEFT;
-    frame.draw_text(font, text_x, y_top + ROW_PAD_Y + 18, theme::TEXT_PRIMARY, 1.0, display);
-    frame.draw_text(font, text_x, y_top + ROW_PAD_Y + 42, theme::TEXT_MUTED, 0.85, &handle_str);
+    frame.draw_text_with_emoji(
+        font,
+        text_x,
+        y_top + ROW_PAD_Y + 18,
+        theme::TEXT_PRIMARY,
+        1.0,
+        display,
+        ctx.emoji,
+    );
+    frame.draw_text(
+        font,
+        text_x,
+        y_top + ROW_PAD_Y + 42,
+        theme::TEXT_MUTED,
+        0.85,
+        &handle_str,
+    );
 
     frame.fill_rect(
         0.0,

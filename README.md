@@ -26,8 +26,9 @@ text, watch video in colour, send DMs, and sign in with OAuth.
 - **DMs** — read and send direct messages (`chat.bsky.convo.*`).
 - **Sign in** — OAuth (PAR + PKCE + DPoP, via a small callback broker) or a
   Bluesky **app password**.
-- **Quality of life** — circular avatars + colour emoji, on-screen control hints
-  (press **SELECT**), and an on-screen keyboard for text entry.
+- **Quality of life** — circular avatars + colour emoji rendered from the
+  bundled Noto Color Emoji font, on-screen control hints (press **SELECT**), and
+  an on-screen keyboard for text entry.
 
 ## Requirements
 
@@ -48,6 +49,17 @@ Everything the app needs is baked into the VPK — no manual file copying.
 - **App password:** tap *"Use an app password instead"* and enter your handle +
   an [app password](https://bsky.app/settings/app-passwords). To use DMs with an
   app password, enable its *"Allow access to your direct messages"* option.
+
+## Emoji font
+
+Colour emoji are rendered from the bundled Noto Color Emoji font with bounded
+2 MiB glyph pages. The font is pinned to
+[Noto Color Emoji v2026-09-24-unicode18_0](https://github.com/googlefonts/noto-emoji/tree/e20cbc2bbec1926686be9f9bee7d1d2cfa1fea0e),
+source commit `e20cbc2bbec1926686be9f9bee7d1d2cfa1fea0e`, with SHA-256
+`15671215ab769fdc7162a045d56fd7d7e477c51b04e6b3c761d914d8fdd6cc44`. The font
+and its SIL Open Font License are included in the app assets. Use `make push-emoji` to
+transfer both files to an installed Vita; this does not build, update, or launch
+the app.
 
 ## Build from source
 
@@ -76,7 +88,7 @@ crates/
   bsky-auth/    Identity resolve, session store, app-password + OAuth agent dispatch.
   bsky-oauth/   AT Protocol OAuth (PAR+PKCE+DPoP) + file-backed session store.
   bsky-models/  Re-exports of the atrium AT Protocol types we use.
-  bsky-render/  vita2d FFI: PGF/Inter/Twemoji text, textures, theme, QR, video shader.
+  bsky-render/  vita2d FFI: PGF/Inter/Noto Color Emoji text, textures, theme, QR, video shader.
   bsky-input/   sceCtrl + sceTouch input.
   bsky-ime/     sceImeDialog on-screen keyboard.
   bsky-ui/      Widgets, the Screen trait, and every screen.

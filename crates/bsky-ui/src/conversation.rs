@@ -399,15 +399,7 @@ impl Screen for ConversationScreen {
                     let mut y = HEADER_H - self.scroll_y as i32;
                     for (msg, &row_h) in self.messages.iter().zip(self.row_heights.iter()) {
                         if y + row_h > VIEWPORT_TOP && y < VIEWPORT_BOTTOM {
-                            draw_msg(
-                                frame,
-                                font,
-                                msg,
-                                y,
-                                ctx,
-                                self.is_group,
-                                &self.members,
-                            );
+                            draw_msg(frame, font, msg, y, ctx, self.is_group, &self.members);
                         }
                         y += row_h;
                     }
@@ -416,7 +408,13 @@ impl Screen for ConversationScreen {
         }
 
         // ── 9. Sticky header (over scrolled content) ──
-        frame.fill_rect(0.0, 0.0, SCREEN_WIDTH as f32, HEADER_H as f32, theme::FIELD_BG);
+        frame.fill_rect(
+            0.0,
+            0.0,
+            SCREEN_WIDTH as f32,
+            HEADER_H as f32,
+            theme::FIELD_BG,
+        );
         frame.draw_text_centered(font, 26, theme::TEXT_PRIMARY, 1.05, &self.title);
         frame.fill_rect(
             0.0,
@@ -430,7 +428,13 @@ impl Screen for ConversationScreen {
         if matches!(self.phase, Phase::Ready) {
             let interactive = !ime.is_active();
             let cy = (SCREEN_HEIGHT - COMPOSE_H) as f32;
-            frame.fill_rect(0.0, cy, SCREEN_WIDTH as f32, COMPOSE_H as f32, theme::FIELD_BG);
+            frame.fill_rect(
+                0.0,
+                cy,
+                SCREEN_WIDTH as f32,
+                COMPOSE_H as f32,
+                theme::FIELD_BG,
+            );
             frame.fill_rect(0.0, cy, SCREEN_WIDTH as f32, 1.0, theme::TEXT_MUTED);
 
             // Send button (right).
@@ -439,10 +443,16 @@ impl Screen for ConversationScreen {
             let btn_y = SCREEN_HEIGHT - COMPOSE_H + 8;
             let can_send =
                 interactive && !self.draft.is_empty() && !self.send_inflight && !self.auth_blocked;
-            let send_rect =
-                Rect::new(send_x as f32, btn_y as f32, send_w as f32, 40.0);
-            let send_clicked =
-                button(frame, font, send_rect, "Send", &mut self.send_btn, ctx, can_send);
+            let send_rect = Rect::new(send_x as f32, btn_y as f32, send_w as f32, 40.0);
+            let send_clicked = button(
+                frame,
+                font,
+                send_rect,
+                "Send",
+                &mut self.send_btn,
+                ctx,
+                can_send,
+            );
 
             // Text region (left of the button).
             let text_x = 12;
@@ -465,8 +475,16 @@ impl Screen for ConversationScreen {
             } else {
                 (self.draft.clone(), theme::TEXT_PRIMARY)
             };
-            let shown = truncate_to_width(frame, font, &display, 1.0, text_w - 20);
-            frame.draw_text(font, text_x + 10, btn_y + 26, color, 1.0, &shown);
+            let shown = frame.truncate_text_with_emoji(font, 1.0, &display, text_w - 20, ctx.emoji);
+            frame.draw_text_with_emoji(
+                font,
+                text_x + 10,
+                btn_y + 26,
+                color,
+                1.0,
+                &shown,
+                ctx.emoji,
+            );
 
             // Tap the text region → open IME with the current draft.
             let region_pressed = ctx.touches.iter().any(|t| text_rect.contains(t.x, t.y));
@@ -577,8 +595,8 @@ impl Screen for ConversationScreen {
                         Which::Poll => {
                             let max_scroll_before =
                                 (self.row_heights.iter().sum::<i32>() - VIEWPORT_H).max(0) as f32;
-                            let was_at_bottom = self.scroll_y
-                                >= max_scroll_before - BOTTOM_STICKY_MARGIN as f32;
+                            let was_at_bottom =
+                                self.scroll_y >= max_scroll_before - BOTTOM_STICKY_MARGIN as f32;
                             let mut new_arrivals = 0;
                             for item in &b.messages {
                                 let m = self.msg_from_item(item);
@@ -794,7 +812,15 @@ fn draw_msg(
     let mut top = y_top;
     if is_group && !msg.is_own {
         let name = member_name(members, &msg.sender_did);
-        frame.draw_text(font, BUBBLE_MARGIN, y_top + 14, theme::TEXT_MUTED, 0.8, &name);
+        frame.draw_text_with_emoji(
+            font,
+            BUBBLE_MARGIN,
+            y_top + 14,
+            theme::TEXT_MUTED,
+            0.8,
+            &name,
+            ctx.emoji,
+        );
         top += NAME_LINE_H;
     }
 
@@ -844,22 +870,4 @@ fn bubble_text(msg: &Msg) -> String {
     } else {
         msg.text.clone()
     }
-}
-
-/// Greedy truncation with an ellipsis (mirrors widget::truncate_to_width).
-fn truncate_to_width(frame: &Frame, font: &Font, text: &str, scale: f32, max_w: i32) -> String {
-    let (full_w, _) = frame.measure_text(font, scale, text);
-    if full_w <= max_w {
-        return text.to_string();
-    }
-    let mut s = text.to_string();
-    while !s.is_empty() {
-        s.pop();
-        let candidate = format!("{s}…");
-        let (w, _) = frame.measure_text(font, scale, &candidate);
-        if w <= max_w {
-            return candidate;
-        }
-    }
-    String::from("…")
 }

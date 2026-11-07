@@ -46,6 +46,7 @@ futures         = { version = "0.3", default-features = false, features = ["exec
 # Phase 11: pure-Rust QR encoder. We render an authorize URL to a QR matrix
 # on the Vita and upload it as an RGBA texture (no FFI, no image IO).
 qrcode          = { version = "0.14", default-features = false }
+unicode-segmentation = "1.13.3"
 toml            = { version = "0.8", default-features = false, features = ["parse"] }
 
 [patch.crates-io]

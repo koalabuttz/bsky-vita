@@ -97,9 +97,7 @@ pub(crate) fn measure_embed_block(
         }
         PostViewEmbedRefs::AppBskyEmbedExternalView(_) => EXTERNAL_CARD_H,
         PostViewEmbedRefs::AppBskyEmbedVideoView(_) => VIDEO_PLACEHOLDER_H,
-        PostViewEmbedRefs::AppBskyEmbedRecordView(v) => {
-            measure_record_view(frame, font, v, emoji)
-        }
+        PostViewEmbedRefs::AppBskyEmbedRecordView(v) => measure_record_view(frame, font, v, emoji),
         PostViewEmbedRefs::AppBskyEmbedRecordWithMediaView(v) => {
             let media_h = measure_media(frame, font, &v.media);
             let quote_h = measure_record_view(frame, font, &v.record, emoji);
@@ -129,7 +127,7 @@ pub(crate) fn draw_embed_block(
             draw_image_grid(frame, x, y, v, cache);
         }
         PostViewEmbedRefs::AppBskyEmbedExternalView(v) => {
-            draw_external_card(frame, font, x, y, v, cache);
+            draw_external_card(frame, font, x, y, v, cache, emoji);
         }
         PostViewEmbedRefs::AppBskyEmbedVideoView(v) => {
             draw_video_thumb(frame, x, y, v, cache);
@@ -140,16 +138,22 @@ pub(crate) fn draw_embed_block(
         PostViewEmbedRefs::AppBskyEmbedRecordWithMediaView(v) => {
             let media_h = measure_media(frame, font, &v.media);
             draw_media(frame, font, x, y, &v.media, cache);
-            draw_record_view(frame, font, x, y + media_h + GRID_GAP, &v.record, cache, emoji);
+            draw_record_view(
+                frame,
+                font,
+                x,
+                y + media_h + GRID_GAP,
+                &v.record,
+                cache,
+                emoji,
+            );
         }
     }
 }
 
 /// All CDN URLs the embed needs to display. The avatar dispatch loop
 /// in TimelineScreen feeds these into `WorkRequest::FetchImage`.
-pub(crate) fn embed_image_urls(
-    embed: Option<&Union<PostViewEmbedRefs>>,
-) -> Vec<String> {
+pub(crate) fn embed_image_urls(embed: Option<&Union<PostViewEmbedRefs>>) -> Vec<String> {
     let mut out = Vec::new();
     let Some(Union::Refs(refs)) = embed else {
         return out;
@@ -199,7 +203,9 @@ pub(crate) fn image_tap_cells(
     emoji: Option<&EmojiAtlas>,
 ) -> Option<(Vec<ViewerImage>, Vec<(i32, i32, i32, i32)>)> {
     let embed = post.post.embed.as_ref()?;
-    let Union::Refs(refs) = embed else { return None };
+    let Union::Refs(refs) = embed else {
+        return None;
+    };
     let PostViewEmbedRefs::AppBskyEmbedImagesView(v) = refs else {
         return None;
     };
@@ -289,9 +295,7 @@ pub(crate) fn video_in_embed(
 /// AT-URI of the quoted post if the embed contains one. Returns
 /// `None` for non-quote embeds and for unavailable quotes
 /// (blocked / not found / detached / non-post records).
-pub(crate) fn quote_uri_in_embed(
-    embed: Option<&Union<PostViewEmbedRefs>>,
-) -> Option<String> {
+pub(crate) fn quote_uri_in_embed(embed: Option<&Union<PostViewEmbedRefs>>) -> Option<String> {
     let Some(Union::Refs(refs)) = embed else {
         return None;
     };
@@ -357,13 +361,7 @@ fn measure_aspect_image(ar: Option<&AspectRatio>) -> i32 {
     h_from_w.clamp(80, SINGLE_IMG_MAX_H)
 }
 
-fn draw_image_grid(
-    frame: &mut Frame,
-    x: i32,
-    y: i32,
-    v: &ImagesView,
-    cache: &TextureCache,
-) {
+fn draw_image_grid(frame: &mut Frame, x: i32, y: i32, v: &ImagesView, cache: &TextureCache) {
     let n = v.images.len();
     if n == 0 {
         return;
@@ -375,12 +373,30 @@ fn draw_image_grid(
         let w = (h as f32 * aspect) as i32;
         let w = w.min(INNER_W);
         // Left-justified — flush with the body text column.
-        draw_image_cell(frame, &crate::cdn::ensure_jpeg(&img.thumb), x, y, w, h, cache, true);
+        draw_image_cell(
+            frame,
+            &crate::cdn::ensure_jpeg(&img.thumb),
+            x,
+            y,
+            w,
+            h,
+            cache,
+            true,
+        );
         return;
     }
     if n == 2 {
         let cell_w = (INNER_W - GRID_GAP) / 2;
-        draw_image_cell(frame, &v.images[0].thumb, x, y, cell_w, GRID_ROW_H, cache, false);
+        draw_image_cell(
+            frame,
+            &v.images[0].thumb,
+            x,
+            y,
+            cell_w,
+            GRID_ROW_H,
+            cache,
+            false,
+        );
         draw_image_cell(
             frame,
             &v.images[1].thumb,
@@ -397,7 +413,16 @@ fn draw_image_grid(
         let cell_w = (INNER_W - GRID_GAP * 2) / 3;
         for (i, img) in v.images.iter().enumerate() {
             let cx = x + (i as i32) * (cell_w + GRID_GAP);
-            draw_image_cell(frame, &crate::cdn::ensure_jpeg(&img.thumb), cx, y, cell_w, GRID_ROW_H, cache, false);
+            draw_image_cell(
+                frame,
+                &crate::cdn::ensure_jpeg(&img.thumb),
+                cx,
+                y,
+                cell_w,
+                GRID_ROW_H,
+                cache,
+                false,
+            );
         }
         return;
     }
@@ -408,7 +433,16 @@ fn draw_image_grid(
         let col = (i % 2) as i32;
         let cx = x + col * (cell_w + GRID_GAP);
         let cy = y + row * (GRID_4_CELL_H + GRID_GAP);
-        draw_image_cell(frame, &crate::cdn::ensure_jpeg(&img.thumb), cx, cy, cell_w, GRID_4_CELL_H, cache, false);
+        draw_image_cell(
+            frame,
+            &crate::cdn::ensure_jpeg(&img.thumb),
+            cx,
+            cy,
+            cell_w,
+            GRID_4_CELL_H,
+            cache,
+            false,
+        );
     }
 }
 
@@ -441,13 +475,7 @@ fn draw_image_cell(
         }
     } else {
         // Placeholder while loading.
-        frame.fill_rect(
-            x as f32,
-            y as f32,
-            w as f32,
-            h as f32,
-            theme::FIELD_BG,
-        );
+        frame.fill_rect(x as f32, y as f32, w as f32, h as f32, theme::FIELD_BG);
     }
 }
 
@@ -460,9 +488,16 @@ fn draw_external_card(
     y: i32,
     v: &ExternalView,
     cache: &TextureCache,
+    emoji: Option<&EmojiAtlas>,
 ) {
     // Card outline + bg.
-    frame.fill_rect(x as f32, y as f32, INNER_W as f32, EXTERNAL_CARD_H as f32, theme::FIELD_BG);
+    frame.fill_rect(
+        x as f32,
+        y as f32,
+        INNER_W as f32,
+        EXTERNAL_CARD_H as f32,
+        theme::FIELD_BG,
+    );
     let pad = 8;
     let thumb_x = x + pad;
     let thumb_y = y + pad;
@@ -492,8 +527,16 @@ fn draw_external_card(
     }
     let text_x = thumb_x + EXTERNAL_THUMB + 8;
     let text_w = INNER_W - (text_x - x) - pad;
-    let title = truncate_to_width(frame, font, &v.external.title, 1.0, text_w);
-    frame.draw_text(font, text_x, y + pad + 18, theme::TEXT_PRIMARY, 1.0, &title);
+    let title = frame.truncate_text_with_emoji(font, 1.0, &v.external.title, text_w, emoji);
+    frame.draw_text_with_emoji(
+        font,
+        text_x,
+        y + pad + 18,
+        theme::TEXT_PRIMARY,
+        1.0,
+        &title,
+        emoji,
+    );
     let host = host_from_uri(&v.external.uri);
     let host_t = truncate_to_width(frame, font, &host, 0.85, text_w);
     frame.draw_text(font, text_x, y + pad + 44, theme::TEXT_MUTED, 0.85, &host_t);
@@ -553,14 +596,7 @@ fn draw_record_view(
 
 fn draw_placeholder_card(frame: &mut Frame, font: &Font, x: i32, y: i32, text: &str) {
     draw_card_border(frame, x, y, INNER_W, PLACEHOLDER_QUOTE_H);
-    frame.draw_text(
-        font,
-        x + QUOTE_PAD,
-        y + 24,
-        theme::TEXT_MUTED,
-        0.95,
-        text,
-    );
+    frame.draw_text(font, x + QUOTE_PAD, y + 24, theme::TEXT_MUTED, 0.95, text);
 }
 
 fn draw_quote_card(
@@ -621,17 +657,34 @@ fn draw_quote_card(
         .unwrap_or(handle_str);
     let header_x = avatar_x + QUOTE_AVATAR + 6;
     let header_y = avatar_y + 16;
-    let display_truncated =
-        truncate_to_width(frame, font, display, 0.95, INNER_W / 2);
-    let dw = frame.measure_text(font, 0.95, &display_truncated).0;
-    frame.draw_text(font, header_x, header_y, theme::TEXT_PRIMARY, 0.95, &display_truncated);
+    let display_truncated = frame.truncate_text_with_emoji(font, 0.95, display, INNER_W / 2, emoji);
+    let dw = frame
+        .measure_text_with_emoji(font, 0.95, &display_truncated, emoji)
+        .0;
+    frame.draw_text_with_emoji(
+        font,
+        header_x,
+        header_y,
+        theme::TEXT_PRIMARY,
+        0.95,
+        &display_truncated,
+        emoji,
+    );
     let handle_label = format!("@{handle_str}");
     let handle_x = header_x + dw + 6;
     let remaining = INNER_W - (handle_x - x) - QUOTE_PAD;
     if remaining > 30 {
         let handle_truncated =
-            truncate_to_width(frame, font, &handle_label, 0.85, remaining);
-        frame.draw_text(font, handle_x, header_y, theme::TEXT_MUTED, 0.85, &handle_truncated);
+            frame.truncate_text_with_emoji(font, 0.85, &handle_label, remaining, emoji);
+        frame.draw_text_with_emoji(
+            font,
+            handle_x,
+            header_y,
+            theme::TEXT_MUTED,
+            0.85,
+            &handle_truncated,
+            emoji,
+        );
     }
 
     // Body text.
@@ -667,13 +720,7 @@ fn collect_record_urls(record: &Union<ViewRecordRefs>, out: &mut Vec<String>) {
 
 // ─── Video thumbnail ──────────────────────────────────────────────────
 
-fn draw_video_thumb(
-    frame: &mut Frame,
-    x: i32,
-    y: i32,
-    _v: &VideoView,
-    _cache: &TextureCache,
-) {
+fn draw_video_thumb(frame: &mut Frame, x: i32, y: i32, _v: &VideoView, _cache: &TextureCache) {
     // Compact "video here" placeholder — no still-frame preview, just
     // a small dark rect with a centered ▶ glyph. 5.3 will hang
     // playback off the same area.
@@ -740,7 +787,7 @@ fn draw_media(
             draw_video_thumb(frame, x, y, v, cache);
         }
         Some(ViewMediaRefs::AppBskyEmbedExternalView(v)) => {
-            draw_external_card(frame, font, x, y, v, cache);
+            draw_external_card(frame, font, x, y, v, cache, None);
         }
         None => {}
     }
@@ -776,13 +823,7 @@ fn draw_card_border(frame: &mut Frame, x: i32, y: i32, w: i32, h: i32) {
     frame.fill_rect((x + w - 1) as f32, y as f32, 1.0, h as f32, c);
 }
 
-fn truncate_to_width(
-    frame: &Frame,
-    font: &Font,
-    text: &str,
-    scale: f32,
-    max_w: i32,
-) -> String {
+fn truncate_to_width(frame: &Frame, font: &Font, text: &str, scale: f32, max_w: i32) -> String {
     let (full_w, _) = frame.measure_text(font, scale, text);
     if full_w <= max_w {
         return text.to_string();

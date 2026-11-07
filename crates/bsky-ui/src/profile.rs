@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 
 use atrium_api::app::bsky::actor::defs::ProfileViewDetailedData;
 use atrium_api::app::bsky::feed::defs::{FeedViewPost, FeedViewPostReasonRefs, GeneratorView};
-use atrium_api::chat::bsky::convo::defs::ConvoView;
 use atrium_api::app::bsky::graph::defs::{ListView, StarterPackViewBasic};
+use atrium_api::chat::bsky::convo::defs::ConvoView;
 use atrium_api::types::Union;
 use bsky_auth::AuthClient;
 use bsky_ime::Ime;
@@ -306,8 +306,7 @@ impl ProfileScreen {
                 if let Some(tex) = ctx.texture_cache.get(&url) {
                     let tw = tex.width().max(1) as f32;
                     let th = tex.height().max(1) as f32;
-                    let scale =
-                        (SCREEN_WIDTH as f32 / tw).min(SCREEN_HEIGHT as f32 / th);
+                    let scale = (SCREEN_WIDTH as f32 / tw).min(SCREEN_HEIGHT as f32 / th);
                     let dw = tw * scale;
                     let dh = th * scale;
                     let x = (SCREEN_WIDTH as f32 - dw) / 2.0;
@@ -326,8 +325,7 @@ impl ProfileScreen {
 
         // Dismiss: CIRCLE, or a clean tap anywhere (release edge).
         let pressed_now = !ctx.touches.is_empty();
-        let tapped =
-            self.banner_close_btn.pressed_last && !pressed_now && ctx.touches.is_empty();
+        let tapped = self.banner_close_btn.pressed_last && !pressed_now && ctx.touches.is_empty();
         self.banner_close_btn.pressed_last = pressed_now;
         if tapped || ctx.pad.just_pressed(buttons::CIRCLE) {
             self.viewing_banner = false;
@@ -369,25 +367,18 @@ impl ProfileScreen {
     /// resolved DID and the tab hasn't been dispatched yet. Idempotent
     /// per-tab — re-tapping a previously-loaded tab is instant.
     fn maybe_dispatch_active_tab(&mut self, ctx: &UiCtx) {
-        let Some(did) = self.resolved_did.clone() else { return };
+        let Some(did) = self.resolved_did.clone() else {
+            return;
+        };
         let Some(worker) = ctx.worker else { return };
         let (state, source) = match self.active_tab {
-            ProfileTab::Posts => (
-                &mut self.posts_tab,
-                FeedSource::AuthorPosts { actor: did },
-            ),
+            ProfileTab::Posts => (&mut self.posts_tab, FeedSource::AuthorPosts { actor: did }),
             ProfileTab::Replies => (
                 &mut self.replies_tab,
                 FeedSource::AuthorReplies { actor: did },
             ),
-            ProfileTab::Media => (
-                &mut self.media_tab,
-                FeedSource::AuthorMedia { actor: did },
-            ),
-            ProfileTab::Likes => (
-                &mut self.likes_tab,
-                FeedSource::AuthorLikes { actor: did },
-            ),
+            ProfileTab::Media => (&mut self.media_tab, FeedSource::AuthorMedia { actor: did }),
+            ProfileTab::Likes => (&mut self.likes_tab, FeedSource::AuthorLikes { actor: did }),
             ProfileTab::Feeds => {
                 if !self.feeds_tab.dispatched {
                     worker.send(WorkRequest::FetchActorFeeds {
@@ -423,7 +414,10 @@ impl ProfileScreen {
             }
         };
         if !state.dispatched {
-            worker.send(WorkRequest::FetchFeed { source, cursor: None });
+            worker.send(WorkRequest::FetchFeed {
+                source,
+                cursor: None,
+            });
             state.dispatched = true;
             state.fetching = true;
         }
@@ -461,21 +455,29 @@ impl ProfileScreen {
     }
 
     fn viewport_bottom(&self) -> i32 {
-        if self.is_own() { OWN_VIEWPORT_BOTTOM } else { SCREEN_HEIGHT }
+        if self.is_own() {
+            OWN_VIEWPORT_BOTTOM
+        } else {
+            SCREEN_HEIGHT
+        }
     }
 
     /// Stable (scroll-invariant) top y of post `i` in the active tab's
     /// row stack. Computes from the cumulative heights below the strip.
     fn stable_row_top(state: &TabFeedState, i: usize) -> i32 {
         (TAB_STRIP_Y + TAB_STRIP_H)
-            + state.row_heights[..i.min(state.row_heights.len())].iter().sum::<i32>()
+            + state.row_heights[..i.min(state.row_heights.len())]
+                .iter()
+                .sum::<i32>()
     }
 
     /// True if the current selection's row intersects the visible
     /// content band (between the pill strip's bottom and the viewport
     /// bottom). False if the analog stick has scrolled the row away.
     fn is_selected_row_visible(&self) -> bool {
-        let Some(state) = self.active_post_state() else { return true };
+        let Some(state) = self.active_post_state() else {
+            return true;
+        };
         if state.selected_idx >= state.row_heights.len() {
             return true;
         }
@@ -492,7 +494,9 @@ impl ProfileScreen {
     /// used to snap selection when the user has scrolled away from
     /// the prior selection and then presses d-pad.
     fn first_visible_post_idx(&self) -> usize {
-        let Some(state) = self.active_post_state() else { return 0 };
+        let Some(state) = self.active_post_state() else {
+            return 0;
+        };
         let pb = Self::pill_bottom_y(self.scroll_y);
         let vb = self.viewport_bottom();
         let mut stable_top = TAB_STRIP_Y + TAB_STRIP_H;
@@ -513,7 +517,9 @@ impl ProfileScreen {
     fn auto_scroll_to_selected(&mut self) {
         const SCROLL_MARGIN: i32 = 50;
         let (stable_top, row_h) = {
-            let Some(state) = self.active_post_state() else { return };
+            let Some(state) = self.active_post_state() else {
+                return;
+            };
             if state.selected_idx >= state.row_heights.len() {
                 return;
             }
@@ -544,7 +550,9 @@ impl ProfileScreen {
             Some(s) => s,
             None => return,
         };
-        let Some(post) = state.posts.get_mut(state.selected_idx) else { return };
+        let Some(post) = state.posts.get_mut(state.selected_idx) else {
+            return;
+        };
         toggle_engagement(post, worker, kind);
     }
 
@@ -636,7 +644,9 @@ impl ProfileScreen {
     /// real URI replaces our `PENDING_URI` sentinel on response.
     fn toggle_follow(&mut self, ctx: &UiCtx) {
         let Some(worker) = ctx.worker else { return };
-        let ProfileState::Loaded(p) = &mut self.state else { return };
+        let ProfileState::Loaded(p) = &mut self.state else {
+            return;
+        };
         // Always need the target's DID — server requires the resolved
         // identifier; the user might have entered a handle but the
         // profile response carries the resolved DID.
@@ -765,9 +775,7 @@ impl Screen for ProfileScreen {
                         && t.y >= banner_top.max(0)
                         && t.y < banner_bottom
                 });
-            let tapped = self.banner_open_btn.pressed_last
-                && !in_banner
-                && ctx.touches.is_empty();
+            let tapped = self.banner_open_btn.pressed_last && !in_banner && ctx.touches.is_empty();
             self.banner_open_btn.pressed_last = in_banner;
             if tapped {
                 self.viewing_banner = true;
@@ -821,8 +829,8 @@ impl Screen for ProfileScreen {
                 }
             }
             let mut selection_changed = false;
-            let dpad_pressed = ctx.pad.just_pressed(buttons::UP)
-                || ctx.pad.just_pressed(buttons::DOWN);
+            let dpad_pressed =
+                ctx.pad.just_pressed(buttons::UP) || ctx.pad.just_pressed(buttons::DOWN);
             if dpad_pressed && self.active_post_state().is_some() {
                 let n = self.active_post_state().map(|s| s.posts.len()).unwrap_or(0);
                 if n > 0 {
@@ -866,9 +874,7 @@ impl Screen for ProfileScreen {
                 ProfileTab::Feeds => {
                     let n = self.feeds_tab.items.len();
                     if n > 0 {
-                        if ctx.pad.just_pressed(buttons::UP)
-                            && self.feeds_tab.selected_idx > 0
-                        {
+                        if ctx.pad.just_pressed(buttons::UP) && self.feeds_tab.selected_idx > 0 {
                             self.feeds_tab.selected_idx -= 1;
                         }
                         if ctx.pad.just_pressed(buttons::DOWN)
@@ -881,9 +887,7 @@ impl Screen for ProfileScreen {
                 ProfileTab::Lists => {
                     let n = self.lists_tab.items.len();
                     if n > 0 {
-                        if ctx.pad.just_pressed(buttons::UP)
-                            && self.lists_tab.selected_idx > 0
-                        {
+                        if ctx.pad.just_pressed(buttons::UP) && self.lists_tab.selected_idx > 0 {
                             self.lists_tab.selected_idx -= 1;
                         }
                         if ctx.pad.just_pressed(buttons::DOWN)
@@ -896,9 +900,7 @@ impl Screen for ProfileScreen {
                 ProfileTab::Packs => {
                     let n = self.packs_tab.items.len();
                     if n > 0 {
-                        if ctx.pad.just_pressed(buttons::UP)
-                            && self.packs_tab.selected_idx > 0
-                        {
+                        if ctx.pad.just_pressed(buttons::UP) && self.packs_tab.selected_idx > 0 {
                             self.packs_tab.selected_idx -= 1;
                         }
                         if ctx.pad.just_pressed(buttons::DOWN)
@@ -958,7 +960,15 @@ impl Screen for ProfileScreen {
                 );
             }
             ProfileState::Loaded(p) => {
-                draw_profile(frame, font, p, ctx.texture_cache, ctx.avatar_mask, y_offset);
+                draw_profile(
+                    frame,
+                    font,
+                    p,
+                    ctx.texture_cache,
+                    ctx.avatar_mask,
+                    ctx.emoji,
+                    y_offset,
+                );
                 if !self.is_own() {
                     // Follow / Unfollow + Message buttons on other actors'
                     // profiles, side by side. Sits in the action-row band
@@ -976,11 +986,23 @@ impl Screen for ProfileScreen {
                     let left_x = (SCREEN_WIDTH as f32 - total) / 2.0;
                     let btn_y = 340.0 + y_offset as f32;
                     let follow_rect = Rect::new(left_x, btn_y, btn_w, 30.0);
-                    if button(frame, font, follow_rect, label, &mut self.follow_btn, ctx, true) {
+                    if button(
+                        frame,
+                        font,
+                        follow_rect,
+                        label,
+                        &mut self.follow_btn,
+                        ctx,
+                        true,
+                    ) {
                         toggle_follow_clicked = true;
                     }
                     let msg_rect = Rect::new(left_x + btn_w + gap, btn_y, btn_w, 30.0);
-                    let msg_label = if self.messaging { "Opening…" } else { "Message" };
+                    let msg_label = if self.messaging {
+                        "Opening…"
+                    } else {
+                        "Message"
+                    };
                     if button(
                         frame,
                         font,
@@ -1018,9 +1040,8 @@ impl Screen for ProfileScreen {
                         ("Log out", theme::ACCENT)
                     };
                     let pressed_now = ctx.touches.iter().any(|t| rect.contains(t.x, t.y));
-                    let clicked = self.logout_btn.pressed_last
-                        && !pressed_now
-                        && ctx.touches.is_empty();
+                    let clicked =
+                        self.logout_btn.pressed_last && !pressed_now && ctx.touches.is_empty();
                     self.logout_btn.pressed_last = pressed_now;
                     frame.fill_rect(rect.x, rect.y, rect.w, rect.h, color);
                     let scale = 1.1;
@@ -1069,9 +1090,7 @@ impl Screen for ProfileScreen {
                 if let Some(worker) = ctx.worker {
                     self.dm_error = None;
                     self.messaging = true;
-                    worker.send(WorkRequest::GetConvoForMembers {
-                        members: vec![did],
-                    });
+                    worker.send(WorkRequest::GetConvoForMembers { members: vec![did] });
                 }
             }
         }
@@ -1104,15 +1123,9 @@ impl Screen for ProfileScreen {
                 ProfileTab::Replies => self.replies_tab.row_heights.iter().sum(),
                 ProfileTab::Media => self.media_tab.row_heights.iter().sum(),
                 ProfileTab::Likes => self.likes_tab.row_heights.iter().sum(),
-                ProfileTab::Feeds => {
-                    self.feeds_tab.items.len() as i32 * NON_POST_ROW_H
-                }
-                ProfileTab::Lists => {
-                    self.lists_tab.items.len() as i32 * NON_POST_ROW_H
-                }
-                ProfileTab::Packs => {
-                    self.packs_tab.items.len() as i32 * NON_POST_ROW_H
-                }
+                ProfileTab::Feeds => self.feeds_tab.items.len() as i32 * NON_POST_ROW_H,
+                ProfileTab::Lists => self.lists_tab.items.len() as i32 * NON_POST_ROW_H,
+                ProfileTab::Packs => self.packs_tab.items.len() as i32 * NON_POST_ROW_H,
             };
             // Max scroll: enough so the last row's bottom rests at the
             // viewport bottom. Min: TAB_STRIP_Y so the strip can always
@@ -1132,14 +1145,11 @@ impl Screen for ProfileScreen {
             let near_bottom = self.scroll_y as i32 + viewport_bottom + PAGINATION_THRESHOLD
                 >= content_natural_top + total_h;
             if near_bottom {
-                if let (Some(worker), Some(did)) =
-                    (ctx.worker, self.resolved_did.as_deref())
-                {
+                if let (Some(worker), Some(did)) = (ctx.worker, self.resolved_did.as_deref()) {
                     let did = did.to_string();
                     let dispatch = match self.active_tab {
                         ProfileTab::Posts
-                            if !self.posts_tab.fetching
-                                && self.posts_tab.next_cursor.is_some() =>
+                            if !self.posts_tab.fetching && self.posts_tab.next_cursor.is_some() =>
                         {
                             self.posts_tab.fetching = true;
                             Some(WorkRequest::FetchFeed {
@@ -1158,8 +1168,7 @@ impl Screen for ProfileScreen {
                             })
                         }
                         ProfileTab::Media
-                            if !self.media_tab.fetching
-                                && self.media_tab.next_cursor.is_some() =>
+                            if !self.media_tab.fetching && self.media_tab.next_cursor.is_some() =>
                         {
                             self.media_tab.fetching = true;
                             Some(WorkRequest::FetchFeed {
@@ -1168,8 +1177,7 @@ impl Screen for ProfileScreen {
                             })
                         }
                         ProfileTab::Likes
-                            if !self.likes_tab.fetching
-                                && self.likes_tab.next_cursor.is_some() =>
+                            if !self.likes_tab.fetching && self.likes_tab.next_cursor.is_some() =>
                         {
                             self.likes_tab.fetching = true;
                             Some(WorkRequest::FetchFeed {
@@ -1178,8 +1186,7 @@ impl Screen for ProfileScreen {
                             })
                         }
                         ProfileTab::Feeds
-                            if !self.feeds_tab.fetching
-                                && self.feeds_tab.next_cursor.is_some() =>
+                            if !self.feeds_tab.fetching && self.feeds_tab.next_cursor.is_some() =>
                         {
                             self.feeds_tab.fetching = true;
                             Some(WorkRequest::FetchActorFeeds {
@@ -1188,8 +1195,7 @@ impl Screen for ProfileScreen {
                             })
                         }
                         ProfileTab::Lists
-                            if !self.lists_tab.fetching
-                                && self.lists_tab.next_cursor.is_some() =>
+                            if !self.lists_tab.fetching && self.lists_tab.next_cursor.is_some() =>
                         {
                             self.lists_tab.fetching = true;
                             Some(WorkRequest::FetchActorLists {
@@ -1198,8 +1204,7 @@ impl Screen for ProfileScreen {
                             })
                         }
                         ProfileTab::Packs
-                            if !self.packs_tab.fetching
-                                && self.packs_tab.next_cursor.is_some() =>
+                            if !self.packs_tab.fetching && self.packs_tab.next_cursor.is_some() =>
                         {
                             self.packs_tab.fetching = true;
                             Some(WorkRequest::FetchActorStarterPacks {
@@ -1276,11 +1281,7 @@ impl Screen for ProfileScreen {
                         }
                         Some(TapAction::OpenVideo(target)) => {
                             tap_screen_action = Some(ScreenAction::Push(Box::new(
-                                VideoPlayerScreen::new(
-                                    client_for_push,
-                                    target.did,
-                                    target.cid,
-                                ),
+                                VideoPlayerScreen::new(client_for_push, target.did, target.cid),
                             )));
                         }
                         Some(TapAction::ToggleLike(idx)) => {
@@ -1337,10 +1338,7 @@ impl Screen for ProfileScreen {
                         let row_bottom = row_y + NON_POST_ROW_H;
                         if row_bottom > pill_bottom && row_y < viewport_bottom {
                             if touches.iter().any(|&(x, y)| {
-                                x >= 0
-                                    && x < SCREEN_WIDTH
-                                    && y >= row_y
-                                    && y < row_bottom
+                                x >= 0 && x < SCREEN_WIDTH && y >= row_y && y < row_bottom
                             }) {
                                 tap_screen_action = Some(ScreenAction::Push(Box::new(
                                     crate::timeline::TimelineScreen::with_feed(
@@ -1378,13 +1376,7 @@ impl Screen for ProfileScreen {
                 // No tap action wired in v1 — no pack-viewer screen yet.
             } else {
                 let label = format!("TODO: {} tab content", active_label);
-                frame.draw_text_centered(
-                    font,
-                    pill_bottom + 30,
-                    theme::TEXT_MUTED,
-                    0.95,
-                    &label,
-                );
+                frame.draw_text_centered(font, pill_bottom + 30, theme::TEXT_MUTED, 0.95, &label);
             }
             // If a tap led to a Push/Pop, return early (after any
             // visual state we already drew this frame).
@@ -1460,11 +1452,7 @@ impl Screen for ProfileScreen {
     }
 
     fn control_hints(&self) -> Vec<(&'static str, &'static str)> {
-        let mut v = vec![
-            ("D-pad", "Tabs"),
-            ("L1", "Like"),
-            ("TRIANGLE", "Repost"),
-        ];
+        let mut v = vec![("D-pad", "Tabs"), ("L1", "Like"), ("TRIANGLE", "Repost")];
         if !self.is_own() {
             v.push(("CIRCLE", "Back"));
         }
@@ -1632,6 +1620,7 @@ fn draw_profile(
     p: &ProfileViewDetailedData,
     cache: &TextureCache,
     avatar_mask: Option<&Texture>,
+    emoji: Option<&bsky_render::EmojiAtlas>,
     y_offset: i32,
 ) {
     // Banner strip at the very top — full-width 8:1 strip cropped from
@@ -1664,7 +1653,12 @@ fn draw_profile(
         // Placeholder: colored CIRCLE + initial. Circle rather than
         // rect so the placeholder also looks circular against the
         // banner.
-        frame.fill_circle(cx, cy, (AVATAR_SIZE / 2) as f32, placeholder_color(p.handle.as_str()));
+        frame.fill_circle(
+            cx,
+            cy,
+            (AVATAR_SIZE / 2) as f32,
+            placeholder_color(p.handle.as_str()),
+        );
         let source = p
             .display_name
             .as_deref()
@@ -1682,7 +1676,7 @@ fn draw_profile(
         let ty = avatar_y + (AVATAR_SIZE + th) / 2 - 4;
         frame.draw_text(font, tx, ty, theme::BACKGROUND, scale, &initial);
     }
-    let _ = avatar_mask;  // No longer needed for the 96px avatar.
+    let _ = avatar_mask; // No longer needed for the 96px avatar.
 
     // Display name (or fallback to handle). Baseline below the avatar
     // ring (which extends to y=180); allow an ascender's worth of
@@ -1699,8 +1693,18 @@ fn draw_profile(
         .as_ref()
         .map(|v| v.verified_status == "valid")
         .unwrap_or(false);
-    let (name_x, name_y, name_w, _name_h) =
-        frame.draw_text_centered(font, 210 + y_offset, theme::TEXT_PRIMARY, 1.4, display);
+    let (name_w, _name_h) = frame.measure_text_with_emoji(font, 1.4, display, emoji);
+    let name_x = (SCREEN_WIDTH - name_w) / 2;
+    let name_y = 210 + y_offset;
+    frame.draw_text_with_emoji(
+        font,
+        name_x,
+        name_y,
+        theme::TEXT_PRIMARY,
+        1.4,
+        display,
+        emoji,
+    );
     if is_verified {
         // Bsky uses a small filled-circle + check glyph; Inter has a
         // U+2713 ✓ (CHECK MARK) we can render in ACCENT. Visually
@@ -1727,7 +1731,7 @@ fn draw_profile(
         // Truncate to fit the height budget by repeatedly trimming
         // characters until the wrapped text fits.
         let mut clipped = desc.to_string();
-        while frame.measure_text_wrapped_with_emoji(font, DESC_MAX_W, 0.95, &clipped, None) > max_h
+        while frame.measure_text_wrapped_with_emoji(font, DESC_MAX_W, 0.95, &clipped, emoji) > max_h
         {
             // Pop chars from the end until it fits; preserve trailing ellipsis.
             clipped.pop();
@@ -1757,7 +1761,7 @@ fn draw_profile(
             theme::TEXT_PRIMARY,
             0.95,
             &final_text,
-            None,
+            emoji,
         );
     }
 
@@ -1765,9 +1769,7 @@ fn draw_profile(
     let posts = p.posts_count.unwrap_or(0);
     let followers = p.followers_count.unwrap_or(0);
     let follows = p.follows_count.unwrap_or(0);
-    let line = format!(
-        "{posts} posts     {followers} followers     {follows} following"
-    );
+    let line = format!("{posts} posts     {followers} followers     {follows} following");
     frame.draw_text_centered(font, 305 + y_offset, theme::TEXT_MUTED, 0.95, &line);
 
     // Meta line below counts: "Joined Mar 2024 · website · joined via @x's pack"
@@ -1835,9 +1837,17 @@ fn draw_banner(
     // Background fallback first; if we have a real banner, we'll
     // overdraw it. Also covers any letterbox bands when the source's
     // aspect is wider than 8:1.
-    frame.fill_rect(0.0, dst_y, SCREEN_WIDTH as f32, BANNER_H as f32, theme::FIELD_BG);
+    frame.fill_rect(
+        0.0,
+        dst_y,
+        SCREEN_WIDTH as f32,
+        BANNER_H as f32,
+        theme::FIELD_BG,
+    );
 
-    let Some(url) = p.banner.as_deref().map(banner_jpeg) else { return };
+    let Some(url) = p.banner.as_deref().map(banner_jpeg) else {
+        return;
+    };
     let Some(tex) = cache.get(&url) else { return };
     let src_w = tex.width().max(1) as f32;
     let src_h = tex.height().max(1) as f32;
@@ -1883,7 +1893,7 @@ fn draw_tab_pill(
     const STRIP_LEFT_PAD: i32 = 8;
 
     let _ = tab; // tab is reachable as visible_tabs[idx]; kept in
-    // signature for clarity at call site.
+                 // signature for clarity at call site.
 
     // Pre-measure visible-tab widths so we can compute this pill's x.
     let mut x = STRIP_LEFT_PAD;
@@ -1893,8 +1903,16 @@ fn draw_tab_pill(
         if i == idx {
             // Render this pill.
             let is_active = *t == active;
-            let bg = if is_active { theme::ACCENT } else { theme::FIELD_BG };
-            let fg = if is_active { theme::TEXT_PRIMARY } else { theme::TEXT_MUTED };
+            let bg = if is_active {
+                theme::ACCENT
+            } else {
+                theme::FIELD_BG
+            };
+            let fg = if is_active {
+                theme::TEXT_PRIMARY
+            } else {
+                theme::TEXT_MUTED
+            };
             let py = strip_y + PILL_PAD_Y;
             frame.fill_rect(x as f32, py as f32, pw as f32, PILL_H as f32, bg);
             // Text vertically centered in pill: baseline at py + (PILL_H + ascender)/2 ish.
@@ -1944,17 +1962,15 @@ fn draw_posts_content(
             0.95,
             "Could not load posts",
         );
-        frame.draw_text_centered(
-            font,
-            pill_bottom + 60,
-            theme::TEXT_MUTED,
-            0.85,
-            err,
-        );
+        frame.draw_text_centered(font, pill_bottom + 60, theme::TEXT_MUTED, 0.85, err);
         return;
     }
     if state.posts.is_empty() {
-        let label = if state.fetching { "Loading posts…" } else { "No posts yet." };
+        let label = if state.fetching {
+            "Loading posts…"
+        } else {
+            "No posts yet."
+        };
         frame.draw_text_centered(font, pill_bottom + 30, theme::TEXT_MUTED, 0.95, label);
         return;
     }
@@ -1979,13 +1995,14 @@ fn draw_posts_content(
         // Pinned-post badge above the row, if this is the pinned
         // entry. Render in ACCENT to match the verified-✓ tone.
         if state.pinned_idx == Some(i) {
-            frame.draw_text(
+            frame.draw_text_with_emoji(
                 font,
                 64,
                 row_y + 2 + 14,
                 theme::ACCENT,
                 0.75,
                 "📌 Pinned",
+                ctx.emoji,
             );
         }
         draw_post_row(
@@ -2030,7 +2047,11 @@ fn draw_feeds_content(
         return;
     }
     if state.items.is_empty() {
-        let label = if state.fetching { "Loading feeds…" } else { "No feeds yet." };
+        let label = if state.fetching {
+            "Loading feeds…"
+        } else {
+            "No feeds yet."
+        };
         frame.draw_text_centered(font, pill_bottom + 30, theme::TEXT_MUTED, 0.95, label);
         return;
     }
@@ -2086,13 +2107,7 @@ fn draw_feed_row(
             NON_POST_ROW_H as f32,
             theme::FIELD_BG,
         );
-        frame.fill_rect(
-            0.0,
-            y_top as f32,
-            3.0,
-            NON_POST_ROW_H as f32,
-            theme::ACCENT,
-        );
+        frame.fill_rect(0.0, y_top as f32, 3.0, NON_POST_ROW_H as f32, theme::ACCENT);
     }
     // Avatar — circular crop courtesy of the alpha-mask applied at
     // texture-cache insertion time.
@@ -2119,15 +2134,25 @@ fn draw_feed_row(
     }
     // Name + creator handle (right of avatar).
     let text_x = avatar_x + AVATAR + 12;
-    frame.draw_text(
+    let creator_handle = format!("by @{}", item.creator.handle.as_str());
+    let (handle_w, _) = frame.measure_text(font, 0.85, &creator_handle);
+    let name_max_w = (SCREEN_WIDTH - PAD_X - text_x - handle_w - 12).max(0);
+    let display_name = frame.truncate_text_with_emoji(
+        font,
+        1.0,
+        item.display_name.as_str(),
+        name_max_w,
+        ctx.emoji,
+    );
+    frame.draw_text_with_emoji(
         font,
         text_x,
         y_top + 28,
         theme::TEXT_PRIMARY,
         1.0,
-        item.display_name.as_str(),
+        &display_name,
+        ctx.emoji,
     );
-    let creator_handle = format!("by @{}", item.creator.handle.as_str());
     frame.draw_text(
         font,
         text_x,
@@ -2182,7 +2207,11 @@ fn draw_lists_content(
         return;
     }
     if state.items.is_empty() {
-        let label = if state.fetching { "Loading lists…" } else { "No lists yet." };
+        let label = if state.fetching {
+            "Loading lists…"
+        } else {
+            "No lists yet."
+        };
         frame.draw_text_centered(font, pill_bottom + 30, theme::TEXT_MUTED, 0.95, label);
         return;
     }
@@ -2257,15 +2286,25 @@ fn draw_list_row(
         );
     }
     let text_x = avatar_x + AVATAR + 12;
-    frame.draw_text(
+    let creator_handle = format!("by @{}", item.creator.handle.as_str());
+    let (handle_w, _) = frame.measure_text(font, 0.85, &creator_handle);
+    let name_max_w = (SCREEN_WIDTH - PAD_X - text_x - handle_w - 12).max(0);
+    let display_name = frame.truncate_text_with_emoji(
+        font,
+        1.0,
+        item.name.as_str(),
+        name_max_w,
+        ctx.emoji,
+    );
+    frame.draw_text_with_emoji(
         font,
         text_x,
         y_top + 28,
         theme::TEXT_PRIMARY,
         1.0,
-        item.name.as_str(),
+        &display_name,
+        ctx.emoji,
     );
-    let creator_handle = format!("by @{}", item.creator.handle.as_str());
     frame.draw_text(
         font,
         text_x,

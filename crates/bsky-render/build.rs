@@ -69,7 +69,49 @@ fn main() {
             // to our CDRAM textures without burning CPU.
             "SceKernelDmacMgr_stub",
         ];
+        let sdk = std::env::var("VITASDK").expect("VITASDK required for Vita build");
+        let pkg_config = format!("{sdk}/bin/arm-vita-eabi-pkg-config");
+        let mut build = cc::Build::new();
+        build.file("native/emoji_font.c");
+        let output = std::process::Command::new(&pkg_config)
+            .args(["--cflags", "freetype2", "harfbuzz"])
+            .output()
+            .expect("Vita pkg-config for font libraries");
+        assert!(
+            output.status.success(),
+            "Vita font pkg-config cflags failed"
+        );
+        for flag in String::from_utf8(output.stdout)
+            .expect("pkg-config output is UTF-8")
+            .split_whitespace()
+        {
+            if let Some(path) = flag.strip_prefix("-I") {
+                build.include(path);
+            }
+        }
+        build.compile("bsky_emoji_font");
+        println!("cargo:rerun-if-changed=native/emoji_font.c");
+        println!("cargo:rerun-if-changed=native/emoji_font.h");
         for lib in libs {
+            println!("cargo:rustc-link-lib=static={lib}");
+        }
+        let output = std::process::Command::new(&pkg_config)
+            .args(["--libs", "harfbuzz", "freetype2"])
+            .output()
+            .expect("Vita pkg-config for font libraries");
+        assert!(output.status.success(), "Vita font pkg-config libs failed");
+        let mut link_libs = Vec::new();
+        for flag in String::from_utf8(output.stdout)
+            .expect("pkg-config output is UTF-8")
+            .split_whitespace()
+        {
+            if let Some(lib) = flag.strip_prefix("-l") {
+                link_libs.push(lib.to_owned());
+            } else if let Some(path) = flag.strip_prefix("-L") {
+                println!("cargo:rustc-link-search=native={path}");
+            }
+        }
+        for lib in link_libs.into_iter().rev() {
             println!("cargo:rustc-link-lib=static={lib}");
         }
     }
