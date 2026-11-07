@@ -234,6 +234,7 @@ fn main() {
             }
             ScreenAction::Pop => {
                 if screen_stack.len() > 1 {
+                    bsky_render::wait_rendering_done();
                     screen_stack.pop();
                 }
             }

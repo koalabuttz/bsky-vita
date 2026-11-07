@@ -9,5 +9,7 @@ description = "sceAvPlayer + sceAudioOut wrappers for Bluesky video embeds"
 path = "src/lib.rs"
 
 [dependencies]
+bsky-log = { path = "../bsky-log" }
+
+[target.'cfg(target_os = "vita")'.dependencies]
 vitasdk-sys = { workspace = true }
-bsky-log    = { path = "../bsky-log" }

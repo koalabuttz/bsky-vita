@@ -822,9 +822,6 @@ impl Screen for ComposeScreen {
                     // instead the ComposeScreen pops itself by storing
                     // a `done: bool` and returning Pop at the start of
                     // the next frame.
-                    self.state = ComposeState::Editing;
-                    self.segments = vec![Segment::default()];
-                    self.current = 0;
                     self.done = true;
                 }
                 Err(msg) => {
@@ -885,4 +882,44 @@ fn button_invisible(
     let clicked = enabled && state.pressed_last && !pressed_now && ctx.touches.is_empty();
     state.pressed_last = pressed_now;
     clicked
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use atrium_api::agent::atp_agent::AtpAgent;
+    use bsky_auth::{AuthAgent, FileSessionStore, PdsClient, ResolvedIdentity};
+    use std::sync::Arc;
+
+    fn test_client() -> Arc<AuthClient> {
+        let agent = AtpAgent::new(
+            PdsClient::new(Arc::new(Default::default()), "https://unused.invalid"),
+            FileSessionStore::new("/unused/compose-test-session.json"),
+        );
+        Arc::new(AuthClient {
+            agent: AuthAgent::Password(agent),
+            resolved: ResolvedIdentity {
+                did: "did:plc:compose-test".to_string(),
+                pds: "https://unused.invalid".to_string(),
+            },
+        })
+    }
+
+    #[test]
+    fn successful_post_preserves_draft_until_pop() {
+        let mut screen = ComposeScreen::new(test_client(), None, None);
+        screen.segments[0].attachments.push(Attachment {
+            key: "photo.png".to_string(),
+            bytes: Some(vec![1, 2, 3, 4]),
+            mime: "image/png".to_string(),
+            alt: String::new(),
+            preview: None,
+        });
+        screen.state = ComposeState::Submitting;
+        screen.handle_worker_response(WorkResponse::PostCreated(Ok("at://post".to_string())));
+        assert_eq!(screen.segments[0].attachments.len(), 1);
+        assert_eq!(screen.segments[0].attachments[0].bytes.as_deref(), Some(&[1, 2, 3, 4][..]));
+        assert!(screen.done);
+        assert!(!screen.can_post());
+    }
 }
