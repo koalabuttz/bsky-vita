@@ -16,8 +16,8 @@ build_std = "std,panic_unwind"
 # Assets directory: contents mirror the VPK layout. So `static/sce_sys/icon0.png`
 # is packed as `sce_sys/icon0.png` in the VPK.
 assets = "static"
-# vita-mksfoex flags default to ATTRIBUTE2=12 (bumps MAIN heap budget to 365 MiB),
-# inherited from cargo-vita defaults. Override via `vita_mksfoex_flags = [...]` if needed.
+# Keep the expanded heap and set the Vita-visible patch release version.
+vita_mksfoex_flags = ["-d", "ATTRIBUTE2=12", "-s", "APP_VER=01.01"]
 
 [dependencies]
 vitasdk-sys = { workspace = true }
